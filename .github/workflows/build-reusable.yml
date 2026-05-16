@@ -3,7 +3,7 @@ name: Build (Reusable)
 # Reusable workflow: build artifacts from source and tag the commit.
 #
 # Call this from your repo's BUILD.yml:
-#   uses: rnwood/ALM4Dataverse/.github/workflows/build-reusable.yml@stable
+#   uses: ALM4Dataverse/ALM4Dataverse/.github/workflows/build-reusable.yml@stable
 #
 # Outputs the GitHub Actions run ID so downstream DEPLOY workflows can
 # download the artifacts produced here.
@@ -13,7 +13,7 @@ on:
     inputs:
       alm-repository:
         type: string
-        default: 'rnwood/ALM4Dataverse'
+        default: 'ALM4Dataverse/ALM4Dataverse'
         description: 'ALM4Dataverse repository to use (change this if you are using a fork)'
       alm-ref:
         type: string

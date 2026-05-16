@@ -38,12 +38,59 @@ in Entra ID to act as a service principal.
 4. Select "Accounts in this organizational directory only"
 5. Click **Register**
 6. Note the **Application (client) ID** and **Directory (tenant) ID**
-7. Go to **Certificates & secrets** > **New client secret**
-8. Copy the **Value** immediately after creation
+
+You do not need to create a client secret if you use Workload Identity Federation (see below).
+If you prefer client secret authentication, go to **Certificates & secrets** > **New client secret**
+and copy the **Value** immediately after creation.
 
 📖 **Reference**: [Register an app with Entra ID](https://learn.microsoft.com/en-us/entra/identity-platform/quickstart-register-app)
 
-### 3. Application user in each Dataverse environment
+### 3. Configure authentication for the App Registration
+
+Choose one of the following authentication methods.
+
+#### Option A: Workload Identity Federation / OIDC (recommended)
+
+Workload Identity Federation lets GitHub Actions authenticate to Azure using short-lived
+OIDC tokens with no secrets to manage or rotate.
+
+1. In the App Registration, go to **Certificates & secrets** > **Federated credentials**
+2. Click **Add credential**
+3. Select **Other issuer**
+4. Fill in:
+   - **Issuer**: `https://token.actions.githubusercontent.com`
+   - **Subject identifier**: depends on how the workflow runs (see below)
+   - **Name**: e.g. `github-{environment-name}` (alphanumeric and hyphens only)
+   - **Audience**: `api://AzureADTokenExchange`
+5. Click **Add**
+
+**Subject identifier format for GitHub Actions:**
+
+| Workflow scenario | Subject identifier |
+|---|---|
+| Targets a GitHub environment (recommended) | `repo:{owner}/{repo}:environment:{environment-name}` |
+| Branch-based (no GitHub environment) | `repo:{owner}/{repo}:ref:refs/heads/{branch-name}` |
+| Manual dispatch (no environment) | `repo:{owner}/{repo}:ref:refs/heads/{branch-name}` |
+
+> **Example** for an environment named `TEST-main` in the repo `MyOrg/MyApp`:
+> `repo:MyOrg/MyApp:environment:TEST-main`
+
+Since the ALM4Dataverse reusable workflows always declare an `environment:`, the
+environment-based subject format is the recommended choice.  Create one federated
+credential per GitHub environment (Dev-main, TEST-main, PROD, etc.) pointing to the
+same or separate App Registrations.
+
+📖 **References**:
+- [Workload identity federation](https://learn.microsoft.com/en-us/entra/workload-id/workload-identity-federation)
+- [GitHub OIDC with Azure](https://docs.github.com/en/actions/security-for-github-actions/security-hardening-your-deployments/configuring-openid-connect-in-azure)
+
+#### Option B: Client secret (traditional)
+
+1. In the App Registration, go to **Certificates & secrets** > **New client secret**
+2. Add a description and expiry period
+3. Copy the **Value** immediately — you cannot view it again
+
+### 4. Application user in each Dataverse environment
 
 1. Go to the [Power Platform Admin Center](https://admin.powerplatform.microsoft.com)
 2. Select the environment > **Settings** > **Users + permissions** > **Application users**
@@ -101,7 +148,7 @@ If your default branch is not `main`:
 
 ## Credential Configuration
 
-ALM4Dataverse supports two approaches for per-environment credentials.
+ALM4Dataverse supports three approaches for per-environment credentials.
 They can be mixed: use whichever fits each environment.
 
 See [GitHub Secrets & Variables Reference](../config/github-secrets.md) for the full
@@ -109,10 +156,13 @@ list of secrets and variables required for each approach.
 
 ---
 
-### Approach 1: GitHub Environments (recommended)
+### Approach 1: Workload Identity Federation / OIDC (recommended)
 
-GitHub Environments let you store secrets/variables per deployment environment and
-optionally gate deployments with approval rules.
+WIF lets the workflow authenticate to Azure using a short-lived OIDC token issued by
+GitHub — no secrets to store or rotate.
+
+> **Prerequisite**: configure a federated credential on each App Registration as
+> described in [Prerequisites → Workload Identity Federation](#option-a-workload-identity-federation--oidc-recommended).
 
 #### 1.1 Create GitHub Environments
 
@@ -123,9 +173,87 @@ For each Dataverse environment:
 3. Name it to match your deployment target (e.g. `Dev-main`, `TEST-main`, `PROD`)
 4. Click **Configure environment**
 
-#### 1.2 Add secrets and variables
+#### 1.2 Add variables (no client secret needed)
 
-Inside each environment, click **Add secret** / **Add variable** for:
+Inside each environment, add:
+
+| Name | Type | Value |
+|------|------|-------|
+| `AZURE_CLIENT_ID` | Secret | App registration client ID |
+| `AZURE_TENANT_ID` | Secret | Entra ID tenant ID |
+| `DATAVERSESERVICEACCOUNTUPN` | Secret or Variable | UPN of the service account for activating processes |
+| `DATAVERSE_URL` | Variable | Dataverse environment URL (e.g. `https://yourorg-test.crm.dynamics.com`) |
+
+> **Do NOT set `AZURE_CLIENT_SECRET`** — when it is absent the workflows automatically
+> obtain an OIDC token via GitHub's built-in token endpoint.
+
+For connection references and environment variables, add individual entries:
+
+| Name | Type | Value |
+|------|------|-------|
+| `DataverseConnRef_<schema_name>` | Variable | Connection ID GUID |
+| `DataverseEnvVar_<schema_name>` | Variable | Environment variable value |
+
+#### 1.3 Add protection rules (optional)
+
+In the environment settings, you can add:
+- **Required reviewers** — users or teams who must approve before deployment starts
+- **Wait timer** — a delay (in minutes) before deployment runs
+- **Deployment branches** — restrict which branches can deploy to this environment
+
+> ⚠️ **Licence requirement**: Environment protection rules (required reviewers, wait timer,
+> deployment branches) require **GitHub Pro, Team, or Enterprise** for private repositories.
+> Public repositories can use protection rules on any plan.
+> See [GitHub licence limitations](#github-licence-limitations) below.
+
+#### 1.4 Configure your DEPLOY workflow (WIF)
+
+In `DEPLOY-main.yml`, use the "Approach 1/2" blocks (uncomment and adjust):
+
+```yaml
+jobs:
+  deploy-test:
+    if: >
+      github.event_name == 'workflow_dispatch' ||
+      github.event.workflow_run.conclusion == 'success'
+    uses: ALM4Dataverse/ALM4Dataverse/.github/workflows/deploy-environment-reusable.yml@stable
+    with:
+      environment-name: TEST-main
+      build-run-id: >-
+        ${{ github.event_name == 'workflow_dispatch'
+              && inputs.build-run-id
+              || github.event.workflow_run.id }}
+    secrets: inherit   # passes AZURE_CLIENT_ID, AZURE_TENANT_ID (no client secret needed)
+
+  deploy-prod:
+    needs: deploy-test
+    if: >
+      github.event_name == 'workflow_dispatch' ||
+      github.event.workflow_run.conclusion == 'success'
+    uses: ALM4Dataverse/ALM4Dataverse/.github/workflows/deploy-environment-reusable.yml@stable
+    with:
+      environment-name: PROD
+      build-run-id: >-
+        ${{ github.event_name == 'workflow_dispatch'
+              && inputs.build-run-id
+              || github.event.workflow_run.id }}
+    secrets: inherit
+```
+
+---
+
+### Approach 2: GitHub Environments with client secret
+
+Use this approach if you prefer or require client secret authentication while still
+using GitHub Environments for approval gates.
+
+#### 2.1 Create GitHub Environments
+
+Follow the same steps as Approach 1.
+
+#### 2.2 Add secrets and variables (including client secret)
+
+Inside each environment, add:
 
 | Name | Type | Value |
 |------|------|-------|
@@ -149,55 +277,14 @@ Example:
 | `DataverseConnRef_contoso_sharedsharepointonline` | `12345678-1234-1234-1234-123456789abc` |
 | `DataverseEnvVar_contoso_APIEndpoint` | `https://api.test.contoso.com` |
 
-#### 1.3 Add protection rules (optional)
+#### 2.3 Configure your DEPLOY workflow (client secret)
 
-In the environment settings, you can add:
-- **Required reviewers** — users or teams who must approve before deployment starts
-- **Wait timer** — a delay (in minutes) before deployment runs
-- **Deployment branches** — restrict which branches can deploy to this environment
-
-> ⚠️ **Licence requirement**: Environment protection rules (required reviewers, wait timer,
-> deployment branches) require **GitHub Pro, Team, or Enterprise** for private repositories.
-> Public repositories can use protection rules on any plan.
-> See [GitHub licence limitations](#github-licence-limitations) below.
-
-#### 1.4 Configure your DEPLOY workflow
-
-In `DEPLOY-main.yml`, use the "Approach 1" blocks (uncomment and adjust):
-
-```yaml
-jobs:
-  deploy-test:
-    if: >
-      github.event_name == 'workflow_dispatch' ||
-      github.event.workflow_run.conclusion == 'success'
-    uses: rnwood/ALM4Dataverse/.github/workflows/deploy-environment-reusable.yml@stable
-    with:
-      environment-name: TEST-main
-      build-run-id: >-
-        ${{ github.event_name == 'workflow_dispatch'
-              && inputs.build-run-id
-              || github.event.workflow_run.id }}
-    secrets: inherit
-
-  deploy-prod:
-    needs: deploy-test
-    if: >
-      github.event_name == 'workflow_dispatch' ||
-      github.event.workflow_run.conclusion == 'success'
-    uses: rnwood/ALM4Dataverse/.github/workflows/deploy-environment-reusable.yml@stable
-    with:
-      environment-name: PROD
-      build-run-id: >-
-        ${{ github.event_name == 'workflow_dispatch'
-              && inputs.build-run-id
-              || github.event.workflow_run.id }}
-    secrets: inherit
-```
+The YAML is identical to Approach 1 — `secrets: inherit` passes both
+`AZURE_CLIENT_ID` and `AZURE_CLIENT_SECRET` (see [1.4](#14-configure-your-deploy-workflow-wif)).
 
 ---
 
-### Approach 2: Prefixed global secrets
+### Approach 3: Prefixed global secrets
 
 Store all credentials as repository-level secrets/variables using a naming convention
 that includes the environment name as a prefix.  This approach works on **all GitHub
@@ -208,14 +295,14 @@ licence levels** including GitHub Free on private repositories.
 > environment.  For production environments, consider restricting who can trigger the
 > workflow by using branch protection rules on `main` and limiting merge permissions.
 
-#### 1.1 Add secrets and variables
+#### 3.1 Add secrets and variables
 
 In **Settings** > **Secrets and variables** > **Actions**, add:
 
 | Name | Type | Value |
 |------|------|-------|
 | `TEST_MAIN_AZURE_CLIENT_ID` | Secret | App registration client ID |
-| `TEST_MAIN_AZURE_CLIENT_SECRET` | Secret | Client secret |
+| `TEST_MAIN_AZURE_CLIENT_SECRET` | Secret | Client secret (omit if using WIF) |
 | `TEST_MAIN_AZURE_TENANT_ID` | Secret | Tenant ID |
 | `TEST_MAIN_DATAVERSE_SERVICE_ACCOUNT_UPN` | Secret | Service account UPN |
 | `TEST_MAIN_DATAVERSE_URL` | Variable | Dataverse URL |
@@ -244,9 +331,9 @@ For dev environments used in EXPORT/IMPORT, use a prefix like `DEV_MAIN_`.
 }
 ```
 
-#### 1.2 Configure your DEPLOY workflow
+#### 3.2 Configure your DEPLOY workflow (prefixed secrets)
 
-In `DEPLOY-main.yml`, use the "Approach 2" blocks (uncomment and adjust):
+In `DEPLOY-main.yml`, use the "Approach 3" blocks (uncomment and adjust):
 
 ```yaml
 jobs:
@@ -254,7 +341,7 @@ jobs:
     if: >
       github.event_name == 'workflow_dispatch' ||
       github.event.workflow_run.conclusion == 'success'
-    uses: rnwood/ALM4Dataverse/.github/workflows/deploy-environment-reusable.yml@stable
+    uses: ALM4Dataverse/ALM4Dataverse/.github/workflows/deploy-environment-reusable.yml@stable
     with:
       environment-name: TEST-main
       build-run-id: >-

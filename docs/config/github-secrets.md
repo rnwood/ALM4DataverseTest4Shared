@@ -1,26 +1,107 @@
 # GitHub Secrets & Variables Reference
 
 This document describes every secret and variable used by the ALM4Dataverse GitHub
-Actions workflows, and how they map to each of the two credential approaches.
+Actions workflows, and how they map to each of the three credential approaches.
 
 ---
 
 ## Approach comparison
 
-| | GitHub Environments | Prefixed global secrets |
-|---|---|---|
-| Where stored | Per-environment in GitHub repo Settings > Environments | Repo-level secrets/variables with per-environment prefix |
-| Approval gates | ✅ (Pro/Team/Enterprise for private repos) | ❌ |
-| Licence requirement | All plans (protection rules require Pro+) | All plans |
-| Connection refs / env vars | Individual `DataverseConnRef_*` / `DataverseEnvVar_*` variables in environment | Single JSON variable per environment |
+| | WIF / OIDC | GitHub Environments + client secret | Prefixed global secrets |
+|---|---|---|---|
+| Secrets to manage | None | Client secret (rotate periodically) | Client secret (rotate periodically) |
+| Approval gates | ✅ (Pro/Team/Enterprise for private repos) | ✅ (Pro/Team/Enterprise for private repos) | ❌ |
+| Licence requirement | All plans (protection rules require Pro+) | All plans (protection rules require Pro+) | All plans |
+| Connection refs / env vars | Individual `DataverseConnRef_*` / `DataverseEnvVar_*` in environment | Individual `DataverseConnRef_*` / `DataverseEnvVar_*` in environment | Single JSON variable per environment |
+| Entra ID setup | Federated credential per GitHub environment | Client secret | Client secret |
 
 See [GitHub Setup Guide](../setup/github-setup.md) for detailed configuration steps.
 
 ---
 
-## Approach 1: GitHub Environments
+## Approach 1: Workload Identity Federation (OIDC)
 
 Store the following in each GitHub environment (Settings > Environments > {Environment Name}).
+**No client secret is needed.**
+
+### Secrets (sensitive values)
+
+| Secret name | Description |
+|---|---|
+| `AZURE_CLIENT_ID` | Azure app registration (client) ID |
+| `AZURE_TENANT_ID` | Entra ID tenant (directory) ID |
+| `DATAVERSESERVICEACCOUNTUPN` | UPN (email) of the Dataverse service account used to activate processes after deployment |
+
+> Do **not** add `AZURE_CLIENT_SECRET`.  When the workflows detect its absence they
+> automatically request an OIDC token from GitHub and set `AZURE_FEDERATED_TOKEN_FILE`
+> for `DefaultAzureCredential`.
+
+### Variables (non-sensitive values)
+
+| Variable name | Description | Example value |
+|---|---|---|
+| `DATAVERSE_URL` | URL of the target Dataverse environment | `https://yourorg-test.crm.dynamics.com` |
+
+### Entra ID federated credential setup
+
+For each GitHub environment (Dev-main, TEST-main, PROD, …), add a federated credential
+to the corresponding App Registration:
+
+| Field | Value |
+|---|---|
+| Issuer | `https://token.actions.githubusercontent.com` |
+| Subject identifier | `repo:{owner}/{repo}:environment:{environment-name}` |
+| Audience | `api://AzureADTokenExchange` |
+
+**Examples** (repo `MyOrg/MyApp`):
+
+| GitHub environment | Subject identifier |
+|---|---|
+| `Dev-main` | `repo:MyOrg/MyApp:environment:Dev-main` |
+| `TEST-main` | `repo:MyOrg/MyApp:environment:TEST-main` |
+| `PROD` | `repo:MyOrg/MyApp:environment:PROD` |
+
+You can use one App Registration (and one set of federated credentials) for all
+environments, or create separate App Registrations per environment for stronger
+isolation.
+
+📖 **References**:
+- [Workload identity federation](https://learn.microsoft.com/en-us/entra/workload-id/workload-identity-federation)
+- [GitHub OIDC with Azure](https://docs.github.com/en/actions/security-for-github-actions/security-hardening-your-deployments/configuring-openid-connect-in-azure)
+
+### Per-solution connection references
+
+For each connection reference used in your solutions, add a GitHub environment **variable**:
+
+| Variable name | Description |
+|---|---|
+| `DataverseConnRef_<schema_name>` | Connection ID for the named connection reference |
+
+### Per-solution environment variable values
+
+For each Dataverse environment variable, add a GitHub environment **variable** (or
+**secret** if the value is sensitive):
+
+| Variable name | Description |
+|---|---|
+| `DataverseEnvVar_<schema_name>` | Value for the named Dataverse environment variable |
+
+### Example: complete Dev-main environment (WIF)
+
+| Name | Type | Value |
+|------|------|-------|
+| `AZURE_CLIENT_ID` | Secret | `00000000-0000-0000-0000-000000000001` |
+| `AZURE_TENANT_ID` | Secret | `00000000-0000-0000-0000-000000000002` |
+| `DATAVERSESERVICEACCOUNTUPN` | Secret | `svc-dataverse@contoso.com` |
+| `DATAVERSE_URL` | Variable | `https://yourorg-dev.crm.dynamics.com` |
+| `DataverseConnRef_contoso_sharedsharepointonline` | Variable | `12345678-1234-1234-1234-123456789abc` |
+| `DataverseEnvVar_contoso_APIEndpoint` | Variable | `https://api.dev.contoso.com` |
+
+---
+
+## Approach 2: GitHub Environments with client secret
+
+Store the following in each GitHub environment.
 
 ### Secrets (sensitive values)
 
@@ -37,46 +118,12 @@ Store the following in each GitHub environment (Settings > Environments > {Envir
 |---|---|---|
 | `DATAVERSE_URL` | URL of the target Dataverse environment | `https://yourorg-test.crm.dynamics.com` |
 
-### Per-solution connection references
+### Per-solution connection references and environment variables
 
-For each connection reference used in your solutions, add a GitHub environment **variable**:
+Same as Approach 1 — add `DataverseConnRef_*` and `DataverseEnvVar_*` variables in
+the GitHub environment.
 
-| Variable name | Description |
-|---|---|
-| `DataverseConnRef_<schema_name>` | Connection ID for the named connection reference |
-
-Example:
-
-```
-DataverseConnRef_contoso_sharedsharepointonline   = 12345678-1234-1234-1234-123456789abc
-DataverseConnRef_contoso_sharedcommondataserviceforapps = 98765432-9876-9876-9876-987654321xyz
-```
-
-How to find the schema name: open your solution in the Power Platform maker portal >
-**Connection References** > **Name** column.
-
-How to find the connection ID: navigate to the environment in the maker portal >
-**Data** > **Connections** > select the connection > the GUID in the URL is the connection ID.
-
-### Per-solution environment variable values
-
-For each Dataverse environment variable used in your solutions, add a GitHub environment
-**variable** (or **secret** if the value is sensitive):
-
-| Variable name | Description |
-|---|---|
-| `DataverseEnvVar_<schema_name>` | Value for the named Dataverse environment variable |
-
-Example:
-
-```
-DataverseEnvVar_contoso_APIEndpoint = https://api.test.contoso.com
-DataverseEnvVar_contoso_BatchSize   = 50
-```
-
-How to find the schema name: open your solution > **Environment variables** > **Name** column.
-
-### Example: complete Dev-main environment
+### Example: complete Dev-main environment (client secret)
 
 | Name | Type | Value |
 |------|------|-------|
@@ -90,7 +137,7 @@ How to find the schema name: open your solution > **Environment variables** > **
 
 ---
 
-## Approach 2: Prefixed global secrets
+## Approach 3: Prefixed global secrets
 
 Store the following as repository-level secrets and variables
 (Settings > Secrets and variables > Actions).
@@ -106,7 +153,7 @@ Examples in the tables below use `TEST_MAIN_` (for `TEST-main` environment) and
 | Secret name | Description |
 |---|---|
 | `{PREFIX}AZURE_CLIENT_ID` | Azure app registration (client) ID |
-| `{PREFIX}AZURE_CLIENT_SECRET` | Azure client secret value |
+| `{PREFIX}AZURE_CLIENT_SECRET` | Azure client secret value (omit if using WIF with explicit credential passing) |
 | `{PREFIX}AZURE_TENANT_ID` | Entra ID tenant (directory) ID |
 | `{PREFIX}DATAVERSE_SERVICE_ACCOUNT_UPN` | UPN of the Dataverse service account |
 
@@ -183,25 +230,30 @@ The ALM4Dataverse PowerShell scripts use the following OS environment variables:
 |---|---|
 | `AZURE_CLIENT_ID` | GitHub secret — picked up by `DefaultAzureCredential` in `connect.ps1` |
 | `AZURE_TENANT_ID` | GitHub secret — picked up by `DefaultAzureCredential` |
-| `AZURE_CLIENT_SECRET` | GitHub secret — picked up by `DefaultAzureCredential` |
+| `AZURE_CLIENT_SECRET` | GitHub secret — picked up by `DefaultAzureCredential` (client secret auth only) |
+| `AZURE_FEDERATED_TOKEN_FILE` | Set by the WIF setup step — picked up by `DefaultAzureCredential` (WIF auth only) |
 | `DATAVERSE_URL` | GitHub variable/secret — passed to `connect.ps1 -Url` |
 | `DATAVERSESERVICEACCOUNTUPN` | GitHub variable/secret — read by `deploy.ps1` |
 | `DataverseConnRef_<name>` | GitHub env variable (direct) **or** expanded from JSON by the workflow step |
 | `DataverseEnvVar_<name>` | GitHub env variable (direct) **or** expanded from JSON by the workflow step |
 
-When using **GitHub Environments**, individual `DataverseConnRef_*` and `DataverseEnvVar_*`
-variables stored in the environment are injected directly as OS environment variables —
-the deploy script picks them up without any extra mapping.
+**WIF flow**: when `AZURE_CLIENT_SECRET` is absent, the reusable workflow requests a
+short-lived OIDC token from GitHub's token endpoint, writes it to a temp file under
+`$RUNNER_TEMP`, and sets `AZURE_FEDERATED_TOKEN_FILE`.  `DefaultAzureCredential`
+then uses its `WorkloadIdentityCredential` to exchange this token for an Entra ID
+access token — no secrets are stored anywhere.
 
-When using **prefixed global secrets** (JSON approach), the reusable workflow expands
-the JSON objects into individual `DataverseConnRef_*` / `DataverseEnvVar_*` environment
-variables within the same PowerShell step that calls `deploy.ps1`.
+**Client secret flow**: when `AZURE_CLIENT_SECRET` is present, `DefaultAzureCredential`
+uses `EnvironmentCredential` with `AZURE_CLIENT_ID`, `AZURE_TENANT_ID`, and
+`AZURE_CLIENT_SECRET`.
 
 ---
 
 ## References
 
 - [GitHub Setup Guide](../setup/github-setup.md)
+- [Workload identity federation overview](https://learn.microsoft.com/en-us/entra/workload-id/workload-identity-federation)
+- [GitHub OIDC with Azure](https://docs.github.com/en/actions/security-for-github-actions/security-hardening-your-deployments/configuring-openid-connect-in-azure)
 - [Connection references overview](https://learn.microsoft.com/en-us/power-apps/maker/data-platform/create-connection-reference)
 - [Environment variables overview](https://learn.microsoft.com/en-us/power-apps/maker/data-platform/environmentvariables)
 - [GitHub encrypted secrets](https://docs.github.com/en/actions/security-guides/encrypted-secrets)
