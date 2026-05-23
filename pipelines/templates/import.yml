@@ -53,6 +53,46 @@ stages:
             if ([string]::IsNullOrWhiteSpace($environmentUrl) -or $environmentUrl -match '^\$\(.+\)$') {
               throw "Environment URL could not be resolved from the selected connection variables task. Ensure the Power Platform service connection is configured correctly."
             }
+
+            $useAlm4DataverseExtension = '${{ parameters.useAlm4DataverseExtension }}' -eq 'true'
+            if (-not $useAlm4DataverseExtension) {
+              function Resolve-ConnectionVariable {
+                param([string[]]$Candidates)
+
+                foreach ($candidate in $Candidates) {
+                  if (-not [string]::IsNullOrWhiteSpace($candidate) -and $candidate -notmatch '^\$\(.+\)$') {
+                    return $candidate
+                  }
+                }
+
+                return $null
+              }
+
+              $resolvedClientId = Resolve-ConnectionVariable @(
+                $env:AZURE_CLIENT_ID
+                '$(PowerPlatformSetConnectionVariables.BuildTools.ApplicationId)'
+                '$(BuildTools.ApplicationId)'
+              )
+              $resolvedTenantId = Resolve-ConnectionVariable @(
+                $env:AZURE_TENANT_ID
+                '$(PowerPlatformSetConnectionVariables.BuildTools.TenantId)'
+                '$(BuildTools.TenantId)'
+              )
+              $resolvedClientSecret = Resolve-ConnectionVariable @(
+                $env:AZURE_CLIENT_SECRET
+                '$(PowerPlatformSetConnectionVariables.BuildTools.ClientSecret)'
+                '$(BuildTools.ClientSecret)'
+              )
+
+              if ([string]::IsNullOrWhiteSpace($resolvedClientId) -or [string]::IsNullOrWhiteSpace($resolvedTenantId) -or [string]::IsNullOrWhiteSpace($resolvedClientSecret)) {
+                throw "Service principal credentials could not be resolved from Set Connection Variables task outputs. Verify the Power Platform service connection and task output variable names."
+              }
+
+              $env:AZURE_CLIENT_ID = $resolvedClientId
+              $env:AZURE_TENANT_ID = $resolvedTenantId
+              $env:AZURE_CLIENT_SECRET = $resolvedClientSecret
+            }
+
             & "$(Pipeline.Workspace)/alm/pipelines/scripts/connect.ps1" -Url $environmentUrl
             & "$(Pipeline.Workspace)/alm/pipelines/scripts/import.ps1" `
               -SourceDirectory "$(Pipeline.Workspace)/self" `
@@ -63,6 +103,6 @@ stages:
             ${{ if eq(parameters.useAlm4DataverseExtension, true) }}:
               AZURE_CLIENT_SECRET: $(AZURE_CLIENT_SECRET)
             ${{ if ne(parameters.useAlm4DataverseExtension, true) }}:
-              AZURE_CLIENT_ID: $(BuildTools.ApplicationId)
-              AZURE_TENANT_ID: $(BuildTools.TenantId)
-              AZURE_CLIENT_SECRET: $(BuildTools.ClientSecret)
+              AZURE_CLIENT_ID: $(PowerPlatformSetConnectionVariables.BuildTools.ApplicationId)
+              AZURE_TENANT_ID: $(PowerPlatformSetConnectionVariables.BuildTools.TenantId)
+              AZURE_CLIENT_SECRET: $(PowerPlatformSetConnectionVariables.BuildTools.ClientSecret)
