@@ -4,6 +4,9 @@ parameters:
   - name: useAlm4DataverseExtension
     type: boolean
     default: true
+  - name: timeoutInMinutes
+    type: number
+    default: 360  # maximum allowed on Microsoft-hosted agents (free and paid)
 
 stages:
   - stage: Deploy_${{ replace(replace(replace(replace(replace(replace(parameters.environmentName, ' ', '_'), '-', '_'), '.', '_'), '(', '_'), ')', '_'), '/', '_') }}
@@ -11,8 +14,11 @@ stages:
     
     jobs:
       - deployment: Deploy
+        pool: 
+          vmImage: windows-2022
         displayName: 'Deploy'
         environment: ${{ parameters.environmentName }}
+        timeoutInMinutes: ${{ parameters.timeoutInMinutes }}
         
         variables:
           # Convention-based variable group: Environment-{EnvironmentName}
