@@ -50,14 +50,6 @@ on:
           If the environment does not exist in GitHub it will be created automatically
           with no protection rules.  Used to resolve credentials and configuration
           from the GitHub environment, plus prefixed repo-level secrets/variables.
-      alm-repository:
-        type: string
-        default: 'ALM4Dataverse/ALM4Dataverse'
-        description: 'ALM4Dataverse repository to use (change this if you are using a fork)'
-      alm-ref:
-        type: string
-        default: 'stable'
-        description: 'ALM4Dataverse git ref (tag or branch) to use'
 
 jobs:
   import:
@@ -83,11 +75,36 @@ jobs:
           path: self
           fetch-depth: 1
 
+      - name: Resolve ALM checkout source
+        id: resolve-alm-source
+        shell: pwsh
+        run: |
+          $workflowRef = '${{ github.workflow_ref }}'
+
+          $resolvedRepo = ''
+          $resolvedRef = ''
+
+          if ($workflowRef -match '^(?<repo>[^/]+/[^/]+)/\.github/workflows/[^@]+@(?<ref>.+)$') {
+            $resolvedRepo = $Matches['repo']
+            $resolvedRef = $Matches['ref']
+          }
+
+          if ([string]::IsNullOrWhiteSpace($resolvedRepo)) {
+            $resolvedRepo = 'ALM4Dataverse/ALM4Dataverse'
+          }
+          if ([string]::IsNullOrWhiteSpace($resolvedRef)) {
+            $resolvedRef = 'stable'
+          }
+
+          "repository=$resolvedRepo" | Out-File -FilePath $env:GITHUB_OUTPUT -Append -Encoding utf8
+          "ref=$resolvedRef" | Out-File -FilePath $env:GITHUB_OUTPUT -Append -Encoding utf8
+          Write-Host "Resolved ALM checkout source: $resolvedRepo@$resolvedRef"
+
       - name: Checkout ALM4Dataverse
         uses: actions/checkout@v4
         with:
-          repository: ${{ inputs.alm-repository }}
-          ref: ${{ inputs.alm-ref }}
+          repository: ${{ steps.resolve-alm-source.outputs.repository }}
+          ref: ${{ steps.resolve-alm-source.outputs.ref }}
           path: alm
 
       - name: Resolve prefixed repo variables and secrets

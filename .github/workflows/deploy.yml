@@ -88,14 +88,6 @@ on:
           Recommended format: deployed/{environment-name}/{build-run-id}
           Example: deployed/TEST-main/9876543210
           Requires the calling workflow job to have contents: write permission.
-      alm-repository:
-        type: string
-        default: 'ALM4Dataverse/ALM4Dataverse'
-        description: 'ALM4Dataverse repository to use (change this if you are using a fork)'
-      alm-ref:
-        type: string
-        default: 'stable'
-        description: 'ALM4Dataverse git ref (tag or branch) to use'
 
 jobs:
   deploy:
