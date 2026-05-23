@@ -34,10 +34,10 @@ jobs:
       - name: Resolve ALM checkout source
         id: resolve-alm-source
         shell: pwsh
+        env:
+          JOB_CONTEXT_JSON: ${{ toJson(job) }}
         run: |
-          $jobContextJson = @'
-${{ toJson(job) }}
-'@
+          $jobContextJson = $env:JOB_CONTEXT_JSON
 
           $resolvedRepo = ''
           $resolvedRef = ''
