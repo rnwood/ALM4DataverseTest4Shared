@@ -18,9 +18,9 @@ name: 'Deploy $(resources.pipeline.build.runName)'
 appendCommitMessageToRunName: false
 
 stages:
-  
   # Example - uncomment and repeat for each environment to deploy to
 
   # - template: pipelines/templates/stages/deploy-environment.yml@ALM4Dataverse
   #   parameters:
   #     environmentName: Test-main
+  #     useAlm4DataverseExtension: true

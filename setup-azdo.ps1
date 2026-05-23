@@ -11,13 +11,17 @@ param(
     [string]$ALM4DataverseRef
 )
 
+$resolveDevRefAfterGitIsAvailable = $false
+
 # ALM4DataverseRef default handling - injected during release, fallback for development
 if (-not $ALM4DataverseRef) {
     $injectedRef = '__ALM4DATAVERSE_REF__'
     # Check if placeholder was replaced by comparing if it starts with double underscore
     if ($injectedRef -like '__*') {
-        # Placeholders not replaced - must be running from repository for development
-        Write-Host "Development mode: Using 'stable' as ALM4DataverseRef" -ForegroundColor Yellow
+        # Placeholders not replaced - development mode.
+        # We resolve this after Git is available to support local branch/commit selection.
+        $resolveDevRefAfterGitIsAvailable = $true
+        Write-Host "Development mode: Will resolve ALM4DataverseRef from current branch/commit after Git is available (fallback: 'stable')." -ForegroundColor Yellow
         $ALM4DataverseRef = 'stable'
     } else {
         # Placeholder was replaced during release - use the injected value
@@ -268,6 +272,50 @@ function Install-PortableGit {
     }
 }
 
+function Resolve-DevelopmentDefaultAlm4DataverseRef {
+    [CmdletBinding()]
+    param(
+        [Parameter()][string]$PrimaryRepositoryPath,
+        [Parameter()][string]$FallbackRef = 'stable'
+    )
+
+    # Try candidate local repositories in order; use first one that resolves.
+    $candidateRepos = @()
+    foreach ($candidate in @($PrimaryRepositoryPath, $PSScriptRoot)) {
+        if (-not [string]::IsNullOrWhiteSpace($candidate)) {
+            $candidateRepos += $candidate
+        }
+    }
+    $candidateRepos = @($candidateRepos | Select-Object -Unique)
+
+    foreach ($repoPath in $candidateRepos) {
+        $gitDir = Join-Path $repoPath '.git'
+        if (-not (Test-Path -LiteralPath $gitDir)) {
+            continue
+        }
+
+        try {
+            $branch = (& git -C $repoPath branch --show-current 2>$null).Trim()
+            if (-not [string]::IsNullOrWhiteSpace($branch)) {
+                Write-Host "Development mode: Using current local branch '$branch' as ALM4DataverseRef" -ForegroundColor Yellow
+                return $branch
+            }
+
+            $commit = (& git -C $repoPath rev-parse HEAD 2>$null).Trim()
+            if ($commit -match '^[0-9a-f]{40}$') {
+                Write-Host "Development mode: Repository is in detached HEAD; using commit '$commit' as ALM4DataverseRef" -ForegroundColor Yellow
+                return $commit
+            }
+        }
+        catch {
+            throw "Could not resolve development ALM4DataverseRef from '$repoPath': $($_.Exception.Message)"
+        }
+    }
+
+    Write-Host "Development mode: Could not resolve current branch/commit. Using '$FallbackRef' as ALM4DataverseRef" -ForegroundColor Yellow
+    return $FallbackRef
+}
+
 Write-Section "Initialising setup"
 
 $TempModuleRoot = Join-Path ([System.IO.Path]::GetTempPath()) "ALM4Dataverse\Modules"
@@ -347,6 +395,11 @@ if (-not $git) {
 
 Write-Host "Git is now available: $($git.Source)"
 Write-Host "Version: $(git --version)"
+
+if ($resolveDevRefAfterGitIsAvailable) {
+    $ALM4DataverseRef = Resolve-DevelopmentDefaultAlm4DataverseRef -PrimaryRepositoryPath $upstreamRepo -FallbackRef $ALM4DataverseRef
+    Write-Host "Development mode: Resolved ALM4DataverseRef to '$ALM4DataverseRef'" -ForegroundColor Yellow
+}
 
 #endregion
 
@@ -810,10 +863,19 @@ Write-Host "VSTeam configured for organization '$orgName' using a bearer token."
 
 Write-Section "Ensuring Needed Extensions are Enabled"
 
+# ALM4Dataverse extension mode is required for WIF flow.
+$script:useAlm4DataverseExtension = Read-YesNo -Prompt "Use ALM4Dataverse AzDO extension? (required for Workload Identity Federation)"
+if (-not $script:useAlm4DataverseExtension) {
+    Write-Host "ALM4Dataverse extension mode disabled. Setup will use the PPBT Set Connection Variables task for service-connection-based client secret auth." -ForegroundColor Yellow
+}
+
 $requiredExtensions = @(
-    "microsoft-IsvExpTools.PowerPlatform-BuildTools",
-    "ALM4Dataverse.alm4dataverse-azdo-extensions"
+    "microsoft-IsvExpTools.PowerPlatform-BuildTools"
 )
+
+if ($script:useAlm4DataverseExtension) {
+    $requiredExtensions += "ALM4Dataverse.alm4dataverse-azdo-extensions"
+}
 
 foreach ($requiredExtension in $requiredExtensions) {
     $parts = $requiredExtension -split '\.'
@@ -1251,7 +1313,8 @@ function Sync-CopyToYourRepoIntoGitRepo {
     param(
         [Parameter(Mandatory)][string]$SourceRoot,
         [Parameter(Mandatory)][object]$TargetRepo,
-        [Parameter(Mandatory)][string]$PreferredBranch
+        [Parameter(Mandatory)][string]$PreferredBranch,
+        [Parameter()][bool]$UseAlm4DataverseExtension = $true
     )
 
     if (-not (Test-Path -LiteralPath $SourceRoot)) {
@@ -1339,6 +1402,7 @@ function Sync-CopyToYourRepoIntoGitRepo {
         
         foreach ($file in $allSourceFiles) {
             $relativePath = $file.FullName.Substring($SourceRoot.Length).TrimStart('\', '/')
+            $normalizedRelativePath = $relativePath -replace '\\', '/'
             $destPath = Join-Path $cloneRoot $relativePath
             
             $destDir = Split-Path -Parent $destPath
@@ -1350,7 +1414,7 @@ function Sync-CopyToYourRepoIntoGitRepo {
             $sourceFileToUse = $file.FullName
             $isTempFile = $false
 
-            if ($relativePath -replace '\\', '/' -eq 'pipelines/DEPLOY-main.yml') {
+            if ($normalizedRelativePath -eq 'pipelines/DEPLOY-main.yml') {
                 # Rename destination file based on branch
                 $destPath = Join-Path $cloneRoot "pipelines/DEPLOY-$branch.yml"
                 
@@ -1358,7 +1422,19 @@ function Sync-CopyToYourRepoIntoGitRepo {
                 $content = $content -replace "source: 'BUILD'", "source: '$($TargetRepo.Name)\BUILD'"
                 # Update trigger branch
                 $content = $content -replace "- main", "- $branch"
+                if (-not $UseAlm4DataverseExtension) {
+                    $content = $content -replace '(?m)^(\s*#?\s*useAlm4DataverseExtension:\s*)true\s*$', '${1}false'
+                }
                 
+                $tempFile = [System.IO.Path]::GetTempFileName()
+                $content | Set-Content -LiteralPath $tempFile -NoNewline
+                $sourceFileToUse = $tempFile
+                $isTempFile = $true
+            }
+            elseif (-not $UseAlm4DataverseExtension -and $normalizedRelativePath -in @('pipelines/EXPORT.yml', 'pipelines/IMPORT.yml')) {
+                $content = Get-Content -LiteralPath $file.FullName -Raw
+                $content = $content -replace '(?m)^(\s*useAlm4DataverseExtension:\s*)true\s*$', '${1}false'
+
                 $tempFile = [System.IO.Path]::GetTempFileName()
                 $content | Set-Content -LiteralPath $tempFile -NoNewline
                 $sourceFileToUse = $tempFile
@@ -2304,7 +2380,8 @@ function Get-PowerPlatformSCCredentials {
         [Parameter()][string]$ProjectName,
         [Parameter()][string]$EnvironmentName,
         [Parameter()][string]$OrganizationId,
-        [Parameter()][string]$OrganizationName
+        [Parameter()][string]$OrganizationName,
+        [Parameter()][bool]$UseAlm4DataverseExtension = $true
     )
 
     # 1. Try to find existing Service Connection to see if we can reuse its App ID
@@ -2355,7 +2432,7 @@ function Get-PowerPlatformSCCredentials {
         $recommendedApp = $foundApps | Where-Object { $_.appId -eq $existingScAppId } | Select-Object -First 1
     }
    
-    if ($recommendedApp) {
+    if ($UseAlm4DataverseExtension -and $recommendedApp) {
         $menuItems += "Use existing: $($recommendedApp.displayName) ($($recommendedApp.appId))"
         $menuActions += @{ Type = 'ExistingSCApp'; App = $recommendedApp }
         
@@ -2392,16 +2469,22 @@ function Get-PowerPlatformSCCredentials {
         return $action.Creds
     }
     elseif ($action.Type -eq 'CreateNew') {
-        # Prompt for authentication type
-        Write-Host ""
-        $authTypeItems = @(
-            "Workload Identity Federation (recommended, no secrets)",
-            "Service Principal with Secret (traditional)"
-        )
-        $authTypeSelection = Select-FromMenu -Title "Select authentication type for the new service connection" -Items $authTypeItems
-        if ($null -eq $authTypeSelection) { throw "No authentication type selected." }
-        
-        $authType = if ($authTypeSelection -eq 1) { 'Secret' } else { 'WIF' }
+        $authType = 'Secret'
+        if ($UseAlm4DataverseExtension) {
+            # Prompt for authentication type
+            Write-Host ""
+            $authTypeItems = @(
+                "Workload Identity Federation (recommended, no secrets)",
+                "Service Principal with Secret (traditional)"
+            )
+            $authTypeSelection = Select-FromMenu -Title "Select authentication type for the new service connection" -Items $authTypeItems
+            if ($null -eq $authTypeSelection) { throw "No authentication type selected." }
+            
+            $authType = if ($authTypeSelection -eq 1) { 'Secret' } else { 'WIF' }
+        }
+        else {
+            Write-Host "Using Service Principal with Secret authentication because ALM4Dataverse extension mode is disabled." -ForegroundColor Yellow
+        }
         
         $appName = "$ProjectName - $EnvironmentName - deployment"
         
@@ -2419,6 +2502,9 @@ function Get-PowerPlatformSCCredentials {
         }
     }
     elseif ($action.Type -eq 'ExistingSCApp') {
+        if (-not $UseAlm4DataverseExtension) {
+            throw "Reusing existing service connection credentials requires ALM4Dataverse extension mode. Enable extension mode or enter Service Principal details manually."
+        }
         $app = $action.App
         Write-Host "Using existing service connection with App: $($app.displayName) ($($app.appId))" -ForegroundColor Cyan
      
@@ -2449,16 +2535,22 @@ function Get-PowerPlatformSCCredentials {
             }
         }
 
-        # Prompt for authentication type
-        Write-Host ""
-        $authTypeItems = @(
-            "Service Principal with Secret (traditional)",
-            "Workload Identity Federation (recommended, no secrets)"
-        )
-        $authTypeSelection = Select-FromMenu -Title "Select authentication type" -Items $authTypeItems
-        if ($null -eq $authTypeSelection) { throw "No authentication type selected." }
-        
-        $authType = if ($authTypeSelection -eq 0) { 'Secret' } else { 'WIF' }
+        $authType = 'Secret'
+        if ($UseAlm4DataverseExtension) {
+            # Prompt for authentication type
+            Write-Host ""
+            $authTypeItems = @(
+                "Service Principal with Secret (traditional)",
+                "Workload Identity Federation (recommended, no secrets)"
+            )
+            $authTypeSelection = Select-FromMenu -Title "Select authentication type" -Items $authTypeItems
+            if ($null -eq $authTypeSelection) { throw "No authentication type selected." }
+            
+            $authType = if ($authTypeSelection -eq 0) { 'Secret' } else { 'WIF' }
+        }
+        else {
+            Write-Host "Using Service Principal with Secret authentication because ALM4Dataverse extension mode is disabled." -ForegroundColor Yellow
+        }
         
         $secret = $null
         if ($authType -eq 'Secret') {
@@ -2689,7 +2781,7 @@ Invoke-WithErrorHandling -OperationName "Syncing Pipeline Files to Main Reposito
     if ($PSScriptRoot) {
         # Running from a file - use local path
         $copyRoot = Join-Path $PSScriptRoot 'copy-to-your-repo'
-        Sync-CopyToYourRepoIntoGitRepo -SourceRoot $copyRoot -TargetRepo $mainRepo -PreferredBranch 'main'
+        Sync-CopyToYourRepoIntoGitRepo -SourceRoot $copyRoot -TargetRepo $mainRepo -PreferredBranch 'main' -UseAlm4DataverseExtension $script:useAlm4DataverseExtension
     }
     else {
         # Running via iex (no PSScriptRoot) - clone the shared repo to get copy-to-your-repo
@@ -2704,7 +2796,7 @@ Invoke-WithErrorHandling -OperationName "Syncing Pipeline Files to Main Reposito
             }
             
             $copyRoot = Join-Path $sharedRepoClone 'copy-to-your-repo'
-            Sync-CopyToYourRepoIntoGitRepo -SourceRoot $copyRoot -TargetRepo $mainRepo -PreferredBranch 'main'
+            Sync-CopyToYourRepoIntoGitRepo -SourceRoot $copyRoot -TargetRepo $mainRepo -PreferredBranch 'main' -UseAlm4DataverseExtension $script:useAlm4DataverseExtension
         }
         finally {
             # Clean up the temporary clone
@@ -3422,7 +3514,8 @@ function Update-DeployPipelineInMainRepo {
     param(
         [Parameter(Mandatory)][array]$Environments,
         [Parameter(Mandatory)][object]$MainRepo,
-        [Parameter(Mandatory)][string]$AccessToken
+        [Parameter(Mandatory)][string]$AccessToken,
+        [Parameter()][bool]$UseAlm4DataverseExtension = $true
     )
 
     if ($Environments.Count -eq 0) { return }
@@ -3475,8 +3568,8 @@ function Update-DeployPipelineInMainRepo {
                 # Skip parameters line if present
                 if ($i -lt $content.Count -and $content[$i].Trim() -eq "parameters:") {
                     $i++
-                    # Skip environmentName line if present
-                    if ($i -lt $content.Count -and $content[$i].Trim().StartsWith("environmentName:")) {
+                    # Skip parameter entries
+                    while ($i -lt $content.Count -and $content[$i] -match '^\s{6}\S') {
                         $i++
                     }
                 }
@@ -3494,6 +3587,7 @@ function Update-DeployPipelineInMainRepo {
             $newStages += "  - template: pipelines/templates/stages/deploy-environment.yml@ALM4Dataverse`n"
             $newStages += "    parameters:`n"
             $newStages += "      environmentName: $($env.ShortName)`n"
+            $newStages += "      useAlm4DataverseExtension: $($UseAlm4DataverseExtension.ToString().ToLowerInvariant())`n"
         }
 
         Add-Content -LiteralPath $deployYamlPath -Value $newStages
@@ -3553,7 +3647,7 @@ $environments = Invoke-WithErrorHandling -OperationName "Selecting Deployment En
 
 if ($environments.Count -gt 0) {
     Invoke-WithErrorHandling -OperationName "Updating Deployment Pipeline" -AllowSkip -ScriptBlock {
-        Update-DeployPipelineInMainRepo -Environments $environments -MainRepo $mainRepo -AccessToken $azDevOpsAccessToken
+        Update-DeployPipelineInMainRepo -Environments $environments -MainRepo $mainRepo -AccessToken $azDevOpsAccessToken -UseAlm4DataverseExtension $script:useAlm4DataverseExtension
     } | Out-Null
 
     # Get pipeline IDs for authorization
@@ -3586,7 +3680,8 @@ if ($environments.Count -gt 0) {
             -ProjectName $selectedProject.Name `
             -EnvironmentName $env.ShortName `
             -OrganizationId $orgId `
-            -OrganizationName $orgName
+            -OrganizationName $orgName `
+            -UseAlm4DataverseExtension $script:useAlm4DataverseExtension
             if ($credentialsCache -notcontains $script:creds) {
                 $script:credentialsCache += $script:creds
             }
