@@ -77,6 +77,7 @@ Copy-Item (Join-Path $SourceDirectory 'alm-config.psd1') -Destination (Join-Path
 # Create lock file with pinned module versions
 $lockConfig = @{
     scriptDependencies = [hashtable]::new($config.scriptDependencies)
+    pacCliVersion = [string]$config.pacCliVersion
 }
 foreach ($moduleName in ([string[]] $lockConfig.scriptDependencies.Keys)) {
     $module = Get-Module -Name $moduleName
@@ -91,6 +92,15 @@ foreach ($moduleName in ([string[]] $lockConfig.scriptDependencies.Keys)) {
         throw "Module $moduleName not found in loaded modules."
     }
 }
+
+$pacCommand = Get-Command pac -ErrorAction SilentlyContinue
+if ($pacCommand) {
+    $resolvedPacVersion = (& $pacCommand.Source --version | Select-Object -First 1).Trim()
+    if (-not [string]::IsNullOrWhiteSpace($resolvedPacVersion)) {
+        $lockConfig.pacCliVersion = $resolvedPacVersion
+    }
+}
+
 $lockPath = Join-Path $ArtifactStagingDirectory 'scriptDependencies.lock.json'
 $lockConfig | ConvertTo-Json | Out-File $lockPath -Encoding UTF8
 

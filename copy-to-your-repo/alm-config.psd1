@@ -98,6 +98,11 @@
         # 'PnP.PowerShell' = '1.12.0'
     }
 
+    # Power Apps CLI version used by pipeline scripts.
+    # Optional override. Defaults from ALM4Dataverse are used when omitted.
+    # Supports: '' (latest stable), 'prerelease', or a specific version.
+    # pacCliVersion = '2.7.4'
+
     # Timeout in seconds for each solution import operation (default: 10800).
     # Increase this value if solution imports time out in large or complex environments.
     # importTimeoutSeconds = 10800

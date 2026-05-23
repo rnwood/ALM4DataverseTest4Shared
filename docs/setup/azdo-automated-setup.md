@@ -67,6 +67,7 @@ The easiest way to run setup is:
 1) Prompts you to authenticate. The account you select will be used when connecting to AzDO and Dataverse environments during setup. 
 2) Ensures the required Power Platform AzDO Extension is installed in the target AzDO.
    If you have the required level of access it will be enabled automatically.
+   Pipeline execution still uses the pinned `pacCliVersion` installed by `installdependencies.ps1` (the templates keep PPBT `AddToolsToPath` disabled).
 3) Prompts whether to use the ALM4Dataverse extension task for connection-variable resolution.
    - If enabled, setup can use either client secret or workload identity federation authentication.
    - If disabled, setup configures pipelines to use the Power Platform Build Tools **Set Connection Variables** task with service-principal secret auth.

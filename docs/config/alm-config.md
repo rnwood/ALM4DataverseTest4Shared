@@ -120,6 +120,27 @@ scriptDependencies = @{
 When build assets are generated, the version that has been selected is frozen and baked into the configuration file that will be used when deploying.
 This ensures that the same exact version of all dependencies is always used for each release, even across extended time period and environments.
 
+### PAC CLI Version
+
+The pipeline scripts require Power Apps CLI (`pac`) for solution operations (for example export/unpack). `installdependencies.ps1` installs PAC automatically using the configured version.
+
+```powershell
+pacCliVersion = '2.7.4'
+```
+
+**Version Specifications:**
+- Empty string (`''`): Installs the latest stable version
+- `'prerelease'`: Installs the latest prerelease version
+- Specific version (for example `'2.7.4'`): Installs that exact version
+
+For reproducible builds/deployments, pin an explicit version.
+
+> **Azure DevOps note**
+>
+> Azure DevOps templates intentionally set `PowerPlatformToolInstaller@2` with `AddToolsToPath: false`.
+> This prevents the Power Platform Build Tools `pac` from being added to `PATH` and ensures
+> the pinned `pacCliVersion` installed by `installdependencies.ps1` is the one used.
+
 ### Import Timeout
 
 The `importTimeoutSeconds` setting controls how long each individual solution import operation is allowed to run before the deployment script cancels it. The default is 10800 seconds (3 hours).

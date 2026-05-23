@@ -31,7 +31,7 @@ stages:
                 - task: PowerPlatformToolInstaller@2
                   displayName: 'Install Power Platform Tools'
                   inputs:
-                    AddToolsToPath: true
+                    AddToolsToPath: false
                 
                 - ${{ if eq(parameters.useAlm4DataverseExtension, true) }}:
                   - task: ALM4Dataverse.alm4dataverse-azdo-extensions.alm4dataverse-set-connection-variables.ALM4DataverseSetConnectionVariables@1

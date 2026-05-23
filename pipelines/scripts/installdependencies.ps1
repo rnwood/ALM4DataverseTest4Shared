@@ -1,11 +1,12 @@
 <#
 .SYNOPSIS
-    Installs the required PowerShell modules as defined in alm-config.psd1 with optional lock file.
+    Installs required dependencies as defined in alm-config.psd1 with optional lock file.
 .DESCRIPTION
-    This script reads the alm-config.psd1 file to determine which PowerShell modules    
-    need to be installed for the scripts to run. It supports version pinning via a
-    scriptDependencies.lock.json file which is used for consistent module versions
-    in the version that goes into artifacts.
+    This script reads the alm-config.psd1 file to determine which PowerShell modules
+    and PAC CLI version are needed for the scripts to run.
+
+    It supports version pinning via a scriptDependencies.lock.json file which is used
+    for consistent dependency versions in the version that goes into artifacts.
 
     The versions can be specified as:
     - '' (empty string): installs the latest version
@@ -23,6 +24,9 @@ $lockFile = 'scriptDependencies.lock.json'
 if (Test-Path $lockFile) {
     $lockData = Get-Content $lockFile -Raw | ConvertFrom-Json -AsHashtable
     $config.scriptDependencies = $lockData.scriptDependencies
+    if ($lockData.ContainsKey('pacCliVersion')) {
+        $config.pacCliVersion = $lockData.pacCliVersion
+    }
     Write-Host "Using pinned versions from lock file"
 }
 
@@ -67,6 +71,74 @@ foreach ($module in $config.scriptDependencies.Keys) {
     $loadedModule = Get-Module -Name $module
     Write-Host "Loaded $module version $($loadedModule.Version) $($loadedModule.Prerelease)"
 }
+
+$pacCliVersion = ''
+if ($config.ContainsKey('pacCliVersion') -and $null -ne $config.pacCliVersion) {
+    $pacCliVersion = [string]$config.pacCliVersion
+}
+
+$pacToolPath = Join-Path $HOME '.alm4dataverse\tools'
+if (-not (Test-Path $pacToolPath)) {
+    New-Item -ItemType Directory -Path $pacToolPath -Force | Out-Null
+}
+
+$installArgs = @('tool', 'install', 'Microsoft.PowerApps.CLI.Tool', '--tool-path', $pacToolPath)
+$updateArgs = @('tool', 'update', 'Microsoft.PowerApps.CLI.Tool', '--tool-path', $pacToolPath)
+
+if ($pacCliVersion -eq 'prerelease') {
+    $installArgs += '--prerelease'
+    $updateArgs += '--prerelease'
+}
+elseif (-not [string]::IsNullOrWhiteSpace($pacCliVersion)) {
+    $installArgs += @('--version', $pacCliVersion)
+    $updateArgs += @('--version', $pacCliVersion)
+}
+
+Write-Host "Installing PAC CLI with version specifier: '$pacCliVersion'"
+
+$dotnet = Get-Command dotnet -ErrorAction SilentlyContinue
+if (-not $dotnet) {
+    throw "dotnet command not found in PATH. dotnet is required to install PAC CLI."
+}
+
+$pacExePath = Join-Path $pacToolPath 'pac.exe'
+if (Test-Path $pacExePath) {
+    & dotnet @updateArgs
+    if (-not $?) {
+        Write-Host "PAC CLI update failed. Reinstalling..."
+        & dotnet tool uninstall Microsoft.PowerApps.CLI.Tool --tool-path $pacToolPath | Out-Null
+        & dotnet @installArgs
+    }
+}
+else {
+    & dotnet @installArgs
+}
+
+if (-not $?) {
+    throw "Failed to install PAC CLI."
+}
+
+if (-not (($env:PATH -split ';') -contains $pacToolPath)) {
+    $env:PATH = "$pacToolPath;$env:PATH"
+}
+
+if ($env:GITHUB_PATH) {
+    $pacToolPath | Out-File -FilePath $env:GITHUB_PATH -Append -Encoding utf8
+}
+
+if ($env:TF_BUILD -eq 'True') {
+    Write-Host "##vso[task.prependpath]$pacToolPath"
+}
+
+if (-not (Test-Path $pacExePath)) {
+    throw "PAC CLI installation completed but pac.exe was not found at $pacExePath"
+}
+
+$pacVersion = (& $pacExePath --version | Select-Object -First 1).Trim()
+if ([string]::IsNullOrWhiteSpace($pacVersion)) {
+    throw "PAC CLI installation completed but failed to read installed version."
+}
+Write-Host "Installed PAC CLI version $pacVersion"
 
 Write-Host "Dependencies Installed"
 Write-Host "##[endgroup]"
