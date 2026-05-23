@@ -11,13 +11,17 @@ param(
     [string]$ALM4DataverseRef
 )
 
+$resolveDevRefAfterGitIsAvailable = $false
+
 # ALM4DataverseRef default handling - injected during release, fallback for development
 if (-not $ALM4DataverseRef) {
     $injectedRef = '__ALM4DATAVERSE_REF__'
     # Check if placeholder was replaced by comparing if it starts with double underscore
     if ($injectedRef -like '__*') {
-        # Placeholders not replaced - must be running from repository for development
-        Write-Host "Development mode: Using 'stable' as ALM4DataverseRef" -ForegroundColor Yellow
+        # Placeholders not replaced - development mode.
+        # We resolve this after Git is available to support local branch/commit selection.
+        $resolveDevRefAfterGitIsAvailable = $true
+        Write-Host "Development mode: Will resolve ALM4DataverseRef from current branch/commit after Git is available (fallback: 'stable')." -ForegroundColor Yellow
         $ALM4DataverseRef = 'stable'
     } else {
         # Placeholder was replaced during release - use the injected value
@@ -205,6 +209,50 @@ function Import-RequiredModuleVersion {
     Write-Host "Loaded $Name $($loaded.Version)"
 }
 
+function Resolve-DevelopmentDefaultAlm4DataverseRef {
+    [CmdletBinding()]
+    param(
+        [Parameter()][string]$PrimaryRepositoryPath,
+        [Parameter()][string]$FallbackRef = 'stable'
+    )
+
+    # Try candidate local repositories in order; use first one that resolves.
+    $candidateRepos = @()
+    foreach ($candidate in @($PrimaryRepositoryPath, $PSScriptRoot)) {
+        if (-not [string]::IsNullOrWhiteSpace($candidate)) {
+            $candidateRepos += $candidate
+        }
+    }
+    $candidateRepos = @($candidateRepos | Select-Object -Unique)
+
+    foreach ($repoPath in $candidateRepos) {
+        $gitDir = Join-Path $repoPath '.git'
+        if (-not (Test-Path -LiteralPath $gitDir)) {
+            continue
+        }
+
+        try {
+            $branch = (& git -C $repoPath branch --show-current 2>$null).Trim()
+            if (-not [string]::IsNullOrWhiteSpace($branch)) {
+                Write-Host "Development mode: Using current local branch '$branch' as ALM4DataverseRef" -ForegroundColor Yellow
+                return $branch
+            }
+
+            $commit = (& git -C $repoPath rev-parse HEAD 2>$null).Trim()
+            if ($commit -match '^[0-9a-f]{40}$') {
+                Write-Host "Development mode: Repository is in detached HEAD; using commit '$commit' as ALM4DataverseRef" -ForegroundColor Yellow
+                return $commit
+            }
+        }
+        catch {
+            throw "Could not resolve development ALM4DataverseRef from '$repoPath': $($_.Exception.Message)"
+        }
+    }
+
+    Write-Host "Development mode: Could not resolve current branch/commit. Using '$FallbackRef' as ALM4DataverseRef" -ForegroundColor Yellow
+    return $FallbackRef
+}
+
 Write-Section "Initialising setup"
 
 $TempModuleRoot = Join-Path ([System.IO.Path]::GetTempPath()) "ALM4Dataverse\Modules"
@@ -230,6 +278,21 @@ if ($rnwoodDataverseVersion -like '__*') {
         $rnwoodDataverseVersion = $config.scriptDependencies.'Rnwood.Dataverse.Data.PowerShell'
     } else {
         throw "This script appears to be running in development mode but alm-config-defaults.psd1 was not found at $configPath. Please download the released version from https://github.com/ALM4Dataverse/ALM4Dataverse/releases/latest/download/setup-github.ps1"
+    }
+}
+
+# Upstream repository URL is injected during release process
+# For development/testing, use local workspace path or fallback to GitHub
+$upstreamRepo = '__UPSTREAM_REPO__'
+# Check if placeholder was replaced by comparing if it starts with double-underscore
+if ($upstreamRepo -like '__*') {
+    # Placeholders not replaced - must be running from repository for development
+    if ($PSScriptRoot) {
+        Write-Host "Development mode: Using local workspace path as upstream repo" -ForegroundColor Yellow
+        $upstreamRepo = $PSScriptRoot
+    } else {
+        Write-Host "Development mode: Using default GitHub URL as upstream repo" -ForegroundColor Yellow
+        $upstreamRepo = 'https://github.com/ALM4Dataverse/ALM4Dataverse.git'
     }
 }
 
@@ -273,6 +336,11 @@ if (-not $gitCmd) {
 
 Write-Host "GitHub CLI: $($ghCmd.Source)"
 Write-Host "Git: $($gitCmd.Source)"
+
+if ($resolveDevRefAfterGitIsAvailable) {
+    $ALM4DataverseRef = Resolve-DevelopmentDefaultAlm4DataverseRef -PrimaryRepositoryPath $upstreamRepo -FallbackRef $ALM4DataverseRef
+    Write-Host "Development mode: Resolved ALM4DataverseRef to '$ALM4DataverseRef'" -ForegroundColor Yellow
+}
 
 #endregion
 
@@ -347,7 +415,10 @@ function Get-AuthToken {
     param(
         [Parameter(Mandatory)][string]$ResourceUrl,
         [Parameter()][string]$TenantId,
-        [Parameter()][string]$ClientId = '1950a258-227b-4e31-a9cf-717495945fc2' # Azure PowerShell Client ID
+        [Parameter()][string]$ClientId = '1950a258-227b-4e31-a9cf-717495945fc2', # Azure PowerShell Client ID
+        [Parameter()][switch]$ForceInteractive,
+        [Parameter()][string]$PreferredUsername,
+        [Parameter()][switch]$ListAccountsOnly
     )
 
     # Try to load the assembly using LoadWithPartialName as requested
@@ -420,13 +491,28 @@ function Get-AuthToken {
         Set-Variable -Name "MsalApp" -Value $app -Scope Script
     }
 
-    $accounts = $app.GetAccountsAsync().GetAwaiter().GetResult()
-    $account = $accounts | Select-Object -First 1
+    $accounts = @($app.GetAccountsAsync().GetAwaiter().GetResult())
+
+    if ($ListAccountsOnly) {
+        return @($accounts | ForEach-Object { $_.Username } | Where-Object { -not [string]::IsNullOrWhiteSpace($_) } | Select-Object -Unique)
+    }
+
+    $account = $null
+    if (-not [string]::IsNullOrWhiteSpace($PreferredUsername)) {
+        $account = $accounts | Where-Object { $_.Username -ieq $PreferredUsername } | Select-Object -First 1
+        if (-not $account) {
+            Write-Host "Preferred cached Azure login '$PreferredUsername' was not found; using the default cached account selection." -ForegroundColor Yellow
+        }
+    }
+
+    if (-not $account) {
+        $account = $accounts | Select-Object -First 1
+    }
 
     $authResult = $null
 
     try {
-        if ($account) {
+        if (-not $ForceInteractive -and $account) {
             $authResult = $app.AcquireTokenSilent($scopes, $account).ExecuteAsync().GetAwaiter().GetResult()
         }
     }
@@ -436,7 +522,17 @@ function Get-AuthToken {
 
     if (-not $authResult) {
         try {
-            $authResult = $app.AcquireTokenInteractive($scopes).ExecuteAsync().GetAwaiter().GetResult()
+            $interactiveBuilder = $app.AcquireTokenInteractive($scopes)
+
+            if ($ForceInteractive) {
+                $interactiveBuilder = $interactiveBuilder.WithPrompt([Microsoft.Identity.Client.Prompt]::SelectAccount)
+            }
+
+            if (-not [string]::IsNullOrWhiteSpace($PreferredUsername)) {
+                $interactiveBuilder = $interactiveBuilder.WithLoginHint($PreferredUsername)
+            }
+
+            $authResult = $interactiveBuilder.ExecuteAsync().GetAwaiter().GetResult()
         }
         catch {
             Write-Error "Failed to acquire token interactively: $_"
@@ -642,6 +738,503 @@ function Get-GitHubRepoList {
         throw "Failed to list repositories: $($result -join "`n")"
     }
     return $result | ConvertFrom-Json
+}
+
+function Get-GitHubRepo {
+    <#
+    .SYNOPSIS
+        Returns repository details for a single GitHub repository.
+    #>
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory)][string]$Owner,
+        [Parameter(Mandatory)][string]$Repo
+    )
+
+    $result = & gh repo view "$Owner/$Repo" --json nameWithOwner,name,owner,defaultBranchRef 2>&1
+    if ($LASTEXITCODE -ne 0) {
+        throw "Failed to get repository '$Owner/$Repo': $($result -join "`n")"
+    }
+    return $result | ConvertFrom-Json
+}
+
+function Get-GitHubOwnedReposForOwner {
+    <#
+    .SYNOPSIS
+        Returns repositories owned by the specified GitHub account.
+    #>
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory)][string]$Owner
+    )
+
+    $repos = Invoke-GhApi -Endpoint "users/$Owner/repos?type=owner&sort=updated&per_page=100"
+    if (-not $repos) {
+        return @()
+    }
+
+    $normalized = @()
+    foreach ($repo in @($repos)) {
+        $repoFullName = $null
+
+        if ($repo.PSObject.Properties.Name -contains 'full_name' -and -not [string]::IsNullOrWhiteSpace($repo.full_name)) {
+            $repoFullName = [string]$repo.full_name
+        }
+        elseif (
+            ($repo.PSObject.Properties.Name -contains 'owner') -and $repo.owner -and
+            ($repo.owner.PSObject.Properties.Name -contains 'login') -and -not [string]::IsNullOrWhiteSpace($repo.owner.login) -and
+            ($repo.PSObject.Properties.Name -contains 'name') -and -not [string]::IsNullOrWhiteSpace($repo.name)
+        ) {
+            $repoFullName = "$($repo.owner.login)/$($repo.name)"
+        }
+
+        if ([string]::IsNullOrWhiteSpace($repoFullName)) {
+            continue
+        }
+
+        $normalized += [pscustomobject]@{
+            full_name = $repoFullName
+        }
+    }
+
+    return @($normalized | Sort-Object -Property full_name -Unique)
+}
+
+function Resolve-GitHubRepoFullNameFromSource {
+    <#
+    .SYNOPSIS
+        Resolves a GitHub repository full name (owner/repo) from URL, owner/repo text, or a local git repository path.
+    #>
+    [CmdletBinding()]
+    param(
+        [Parameter()][string]$Source,
+        [Parameter()][string]$Fallback = 'ALM4Dataverse/ALM4Dataverse'
+    )
+
+    if (-not [string]::IsNullOrWhiteSpace($Source)) {
+        $trimmed = $Source.Trim()
+
+        if ($trimmed -match '^[^/\s]+/[^/\s]+$') {
+            return $trimmed
+        }
+
+        if ($trimmed -match 'github\.com[:/]+([^/]+)/([^/]+?)(?:\.git)?/?$') {
+            return "$($Matches[1])/$($Matches[2])"
+        }
+
+        if (Test-Path -LiteralPath $trimmed) {
+            try {
+                $originUrl = (& git -C $trimmed config --get remote.origin.url 2>$null).Trim()
+                if (-not [string]::IsNullOrWhiteSpace($originUrl) -and $originUrl -match 'github\.com[:/]+([^/]+)/([^/]+?)(?:\.git)?/?$') {
+                    return "$($Matches[1])/$($Matches[2])"
+                }
+            }
+            catch {
+                # Fall through to fallback
+            }
+        }
+    }
+
+    return $Fallback
+}
+
+function Resolve-UpstreamGitRemoteSource {
+    <#
+    .SYNOPSIS
+        Resolves an upstream git remote source usable by `git fetch`/`git clone`.
+    #>
+    [CmdletBinding()]
+    param(
+        [Parameter()][string]$ConfiguredSource,
+        [Parameter(Mandatory)][string]$GitHubFullName
+    )
+
+    if (-not [string]::IsNullOrWhiteSpace($ConfiguredSource)) {
+        $trimmed = $ConfiguredSource.Trim()
+
+        if (Test-Path -LiteralPath $trimmed) {
+            return $trimmed
+        }
+
+        if ($trimmed -match '^https?://' -or $trimmed -match '^git@') {
+            return $trimmed
+        }
+
+        if ($trimmed -match '^[^/\s]+/[^/\s]+$') {
+            return "https://github.com/$trimmed.git"
+        }
+
+        if ($trimmed -match 'github\.com[:/]+([^/]+)/([^/]+?)(?:\.git)?/?$') {
+            return "https://github.com/$($Matches[1])/$($Matches[2]).git"
+        }
+    }
+
+    return "https://github.com/$GitHubFullName.git"
+}
+
+function Resolve-GitTargetRefFromRemote {
+    <#
+    .SYNOPSIS
+        Resolves a branch/tag/commit ref against a remote to a local git ref for checkout/merge operations.
+    #>
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory)][string]$RemoteName,
+        [Parameter(Mandatory)][string]$Ref
+    )
+
+    & git ls-remote --exit-code $RemoteName $Ref | Out-Null
+    if ($LASTEXITCODE -eq 2) {
+        throw "Could not resolve reference '$Ref' from remote '$RemoteName'."
+    }
+    if ($LASTEXITCODE -ne 0) {
+        throw "git ls-remote failed for '$RemoteName' with exit code $LASTEXITCODE"
+    }
+
+    $lsRemoteOutput = (& git ls-remote $RemoteName $Ref | Select-Object -First 1)
+    if (-not $lsRemoteOutput) {
+        throw "Could not resolve reference '$Ref' from remote '$RemoteName'."
+    }
+
+    if ($lsRemoteOutput -match '^([a-f0-9]+)\s+(.+)$') {
+        $commitSha = $Matches[1]
+        $fullRef = $Matches[2]
+
+        if ($fullRef -match '^refs/heads/(.+)$') {
+            return "$RemoteName/$($Matches[1])"
+        }
+        elseif ($fullRef -match '^refs/tags/') {
+            return $commitSha
+        }
+        else {
+            return $Ref
+        }
+    }
+
+    return $Ref
+}
+
+function Get-GitHubForksOfRepositoryForOwner {
+    <#
+    .SYNOPSIS
+        Lists repositories owned by a user that are forks of the specified upstream repository.
+    #>
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory)][string]$Owner,
+        [Parameter(Mandatory)][string]$UpstreamFullName
+    )
+
+    $ownedRepos = Invoke-GhApi -Endpoint "users/$Owner/repos?type=owner&sort=updated&per_page=100"
+    if (-not $ownedRepos) {
+        return @()
+    }
+
+    $matchingForks = @()
+
+    foreach ($repo in @($ownedRepos)) {
+        $isFork = $false
+        if ($repo.PSObject.Properties.Name -contains 'fork') {
+            $isFork = [bool]$repo.fork
+        }
+        if (-not $isFork) {
+            continue
+        }
+
+        $repoFullName = $null
+        if ($repo.PSObject.Properties.Name -contains 'full_name' -and -not [string]::IsNullOrWhiteSpace($repo.full_name)) {
+            $repoFullName = [string]$repo.full_name
+        }
+        elseif (
+            ($repo.PSObject.Properties.Name -contains 'owner') -and $repo.owner -and
+            ($repo.owner.PSObject.Properties.Name -contains 'login') -and -not [string]::IsNullOrWhiteSpace($repo.owner.login) -and
+            ($repo.PSObject.Properties.Name -contains 'name') -and -not [string]::IsNullOrWhiteSpace($repo.name)
+        ) {
+            $repoFullName = "$($repo.owner.login)/$($repo.name)"
+        }
+
+        if ([string]::IsNullOrWhiteSpace($repoFullName)) {
+            continue
+        }
+
+        # Some API responses do not include 'parent'. Resolve using repo details when required.
+        $parentFullName = $null
+        if (
+            ($repo.PSObject.Properties.Name -contains 'parent') -and $repo.parent -and
+            ($repo.parent.PSObject.Properties.Name -contains 'full_name') -and -not [string]::IsNullOrWhiteSpace($repo.parent.full_name)
+        ) {
+            $parentFullName = [string]$repo.parent.full_name
+        }
+        else {
+            $repoDetails = Invoke-GhApi -Endpoint "repos/$repoFullName" -AllowNotFound
+            if (
+                $repoDetails -and
+                ($repoDetails.PSObject.Properties.Name -contains 'parent') -and $repoDetails.parent -and
+                ($repoDetails.parent.PSObject.Properties.Name -contains 'full_name') -and -not [string]::IsNullOrWhiteSpace($repoDetails.parent.full_name)
+            ) {
+                $parentFullName = [string]$repoDetails.parent.full_name
+            }
+        }
+
+        if ($parentFullName -ieq $UpstreamFullName) {
+            $matchingForks += [pscustomobject]@{
+                full_name = $repoFullName
+            }
+        }
+    }
+
+    return @($matchingForks)
+}
+
+function Ensure-GitHubForkForSharedWorkflows {
+    <#
+    .SYNOPSIS
+        Ensures the user has a fork of the ALM4Dataverse shared workflow repository and optionally updates it from upstream.
+    #>
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory)][string]$UpstreamFullName,
+        [Parameter(Mandatory)][string]$ForkOwner,
+        [Parameter(Mandatory)][string]$UpstreamGitSource,
+        [Parameter(Mandatory)][string]$Reference
+    )
+
+    $existingForks = @(Get-GitHubForksOfRepositoryForOwner -Owner $ForkOwner -UpstreamFullName $UpstreamFullName)
+    $ownedRepos = @(Get-GitHubOwnedReposForOwner -Owner $ForkOwner)
+
+    $menuItems = @()
+    $menuActions = @()
+
+    foreach ($fork in $existingForks) {
+        $menuItems += "Use existing fork: $($fork.full_name)"
+        $menuActions += @{ Type = 'UseExisting'; FullName = $fork.full_name }
+    }
+
+    $forkFullNameMap = @{}
+    foreach ($fork in $existingForks) {
+        if ($fork.full_name) {
+            $forkFullNameMap[$fork.full_name.ToLowerInvariant()] = $true
+        }
+    }
+
+    $nonForkRepos = @($ownedRepos | Where-Object {
+        $repoFullName = $_.full_name
+        if ([string]::IsNullOrWhiteSpace($repoFullName)) {
+            return $false
+        }
+
+        return -not $forkFullNameMap.ContainsKey($repoFullName.ToLowerInvariant())
+    })
+
+    foreach ($repo in $nonForkRepos) {
+        $menuItems += "Use existing repository: $($repo.full_name)"
+        $menuActions += @{ Type = 'UseExisting'; FullName = $repo.full_name }
+    }
+
+    $menuItems += 'Create a new repository'
+    $menuActions += @{ Type = 'CreateNew' }
+
+    $selection = Select-FromMenu -Title "Select shared workflow repository" -Items $menuItems
+    if ($null -eq $selection) {
+        throw "No shared workflow repository selected."
+    }
+
+    $selectedForkFullName = $null
+    $selectedAction = $menuActions[$selection]
+    if ($selectedAction.Type -eq 'UseExisting') {
+        $selectedForkFullName = $selectedAction.FullName
+    }
+
+    if (-not $selectedForkFullName) {
+        $upstreamParts = $UpstreamFullName.Split('/', 2)
+        $defaultForkName = $upstreamParts[1]
+
+        while ($true) {
+            $forkName = Read-Host "Fork repository name [$defaultForkName]"
+            if ([string]::IsNullOrWhiteSpace($forkName)) {
+                $forkName = $defaultForkName
+            }
+
+            if ($forkName -match '^[A-Za-z0-9._-]+$') {
+                break
+            }
+
+            Write-Warning "Repository name contains invalid characters. Use letters, numbers, dot (.), underscore (_), or hyphen (-)."
+        }
+
+        $selectedForkFullName = "$ForkOwner/$forkName"
+        Write-Host "Creating fork '$selectedForkFullName' from '$UpstreamFullName'..." -ForegroundColor Yellow
+
+        $createArgs = @('repo', 'fork', $UpstreamFullName, '--clone=false', '--fork-name', $forkName)
+        $createResult = & gh @createArgs 2>&1
+        if ($LASTEXITCODE -ne 0) {
+            $errText = $createResult -join "`n"
+            if ($errText -match 'already exists') {
+                Write-Host "Repository '$selectedForkFullName' already exists; continuing." -ForegroundColor Yellow
+            }
+            else {
+                throw "Failed to create fork '$selectedForkFullName': $errText"
+            }
+        }
+    }
+
+    $forkParts = $selectedForkFullName.Split('/', 2)
+    $forkOwnerName = $forkParts[0]
+    $forkRepoName = $forkParts[1]
+    $forkRepo = Get-GitHubRepo -Owner $forkOwnerName -Repo $forkRepoName
+
+    $defaultBranch = 'main'
+    if ($forkRepo.defaultBranchRef -and $forkRepo.defaultBranchRef.name) {
+        $defaultBranch = $forkRepo.defaultBranchRef.name
+    }
+
+    $workParent = Join-Path $env:TEMP ("ALM4Dataverse-ForkSync-" + [guid]::NewGuid().ToString('n'))
+    $workRoot = Join-Path $workParent 'repo'
+    New-DirectoryIfMissing -Path $workParent
+
+    $didPushLocation = $false
+    try {
+        Write-Host "Checking fork '$selectedForkFullName' against upstream '$UpstreamFullName'..." -ForegroundColor DarkGray
+
+        & gh repo clone $selectedForkFullName $workRoot 2>&1 | Out-Host
+        if ($LASTEXITCODE -ne 0) {
+            throw "Failed to clone fork '$selectedForkFullName'."
+        }
+
+        Push-Location $workRoot
+        $didPushLocation = $true
+
+        & git checkout $defaultBranch 2>&1 | Out-Null
+        if ($LASTEXITCODE -ne 0) {
+            & git checkout -b $defaultBranch "origin/$defaultBranch" 2>&1 | Out-Null
+            if ($LASTEXITCODE -ne 0) {
+                throw "Failed to check out fork default branch '$defaultBranch'."
+            }
+        }
+
+        # Reset upstream remote to the configured source
+        & git remote remove upstream 2>$null | Out-Null
+        & git remote add upstream $UpstreamGitSource 2>&1 | Out-Null
+        if ($LASTEXITCODE -ne 0) {
+            throw "Failed to add upstream remote '$UpstreamGitSource'."
+        }
+
+        & git fetch upstream 2>&1 | Out-Null
+        if ($LASTEXITCODE -ne 0) {
+            throw "Failed to fetch upstream remote."
+        }
+
+        $upstreamRef = Resolve-GitTargetRefFromRemote -RemoteName 'upstream' -Ref $Reference
+
+        $localHash = (& git rev-parse HEAD).Trim()
+        $upstreamHash = (& git rev-parse $upstreamRef).Trim()
+
+        if ($localHash -eq $upstreamHash) {
+            Write-Host "Fork is already up to date for ref '$Reference'."
+        }
+        else {
+            & git merge-base --is-ancestor HEAD $upstreamRef
+            $canFastForward = ($LASTEXITCODE -eq 0)
+
+            if ($canFastForward) {
+                if (Read-YesNo -Prompt "Updates are available from upstream (fast-forward). Update '$selectedForkFullName'?" ) {
+                    Write-Host "Fast-forwarding fork..." -ForegroundColor Yellow
+                    & git merge --ff-only $upstreamRef 2>&1 | Out-Host
+                    if ($LASTEXITCODE -ne 0) { throw "Git merge failed." }
+
+                    & git push origin $defaultBranch 2>&1 | Out-Host
+                    if ($LASTEXITCODE -ne 0) { throw "Git push failed." }
+
+                    Write-Host "Fork updated successfully."
+                }
+            }
+            else {
+                & git merge-base --is-ancestor $upstreamRef HEAD
+                $isAhead = ($LASTEXITCODE -eq 0)
+
+                if ($isAhead) {
+                    Write-Host "Fork is ahead of upstream for ref '$Reference'." -ForegroundColor Yellow
+                }
+                else {
+                    if (Read-YesNo -Prompt "Fork '$selectedForkFullName' has diverged from upstream. Attempt rebase to update?" ) {
+                        Write-Host "Rebasing fork onto upstream ref..." -ForegroundColor Yellow
+                        & git rebase $upstreamRef 2>&1 | Out-Host
+                        if ($LASTEXITCODE -ne 0) {
+                            throw "Git rebase failed - resolve conflicts manually in '$selectedForkFullName'."
+                        }
+
+                        Write-Host "Pushing rebased branch (force-with-lease)..." -ForegroundColor Yellow
+                        & git push --force-with-lease origin $defaultBranch 2>&1 | Out-Host
+                        if ($LASTEXITCODE -ne 0) { throw "Git push failed." }
+
+                        Write-Host "Fork updated successfully."
+                    }
+                }
+            }
+        }
+    }
+    finally {
+        if ($didPushLocation) {
+            Pop-Location
+        }
+        try { Remove-Item -LiteralPath $workParent -Recurse -Force -ErrorAction SilentlyContinue } catch { }
+    }
+
+    return Get-GitHubRepo -Owner $forkOwnerName -Repo $forkRepoName
+}
+
+function New-GitHubRepositoryInteractive {
+    <#
+    .SYNOPSIS
+        Interactively creates a new GitHub repository.
+    #>
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory)][string]$DefaultOwner
+    )
+
+    Write-Host ""
+    Write-Host "Create a new GitHub repository" -ForegroundColor Green
+    Write-Host ""
+
+    $owner = Read-Host "Repository owner (user or org) [$DefaultOwner]"
+    if ([string]::IsNullOrWhiteSpace($owner)) {
+        $owner = $DefaultOwner
+    }
+
+    $repoName = $null
+    while ($true) {
+        $repoName = Read-Host "New repository name"
+        if ([string]::IsNullOrWhiteSpace($repoName)) {
+            Write-Warning "Repository name cannot be empty."
+            continue
+        }
+
+        if ($repoName -match '^[A-Za-z0-9._-]+$') {
+            break
+        }
+
+        Write-Warning "Repository name contains invalid characters. Use letters, numbers, dot (.), underscore (_), or hyphen (-)."
+    }
+
+    $visibilityItems = @('Private', 'Public')
+    $visibilitySelection = Select-FromMenu -Title "Select repository visibility" -Items $visibilityItems
+    if ($null -eq $visibilitySelection) {
+        throw "No repository visibility selected."
+    }
+
+    $visibilityFlag = if ($visibilitySelection -eq 0) { '--private' } else { '--public' }
+    $repoFullName = "$owner/$repoName"
+
+    Write-Host "Creating repository '$repoFullName'..." -ForegroundColor Yellow
+    $createArgs = @('repo', 'create', $repoFullName, $visibilityFlag, '--add-readme')
+    $result = & gh @createArgs 2>&1
+    if ($LASTEXITCODE -ne 0) {
+        throw "Failed to create repository '$repoFullName': $($result -join "`n")"
+    }
+
+    Write-Host "Created repository '$repoFullName'." -ForegroundColor Green
+    return Get-GitHubRepo -Owner $owner -Repo $repoName
 }
 
 #endregion
@@ -1403,7 +1996,9 @@ function Copy-WorkflowTemplatesToRepo {
     param(
         [Parameter(Mandatory)][string]$SourceRoot,
         [Parameter(Mandatory)][string]$TargetRoot,
-        [Parameter(Mandatory)][string]$Branch
+        [Parameter(Mandatory)][string]$Branch,
+        [Parameter(Mandatory)][string]$SharedWorkflowRepository,
+        [Parameter(Mandatory)][string]$SharedWorkflowRef
     )
 
     if (-not (Test-Path -LiteralPath $SourceRoot)) {
@@ -1418,6 +2013,7 @@ function Copy-WorkflowTemplatesToRepo {
 
     foreach ($file in $allSourceFiles) {
         $relativePath = $file.FullName.Substring($SourceRoot.Length).TrimStart('\', '/')
+        $normalizedRelativePath = $relativePath -replace '\\','/'
         $destPath     = Join-Path $TargetRoot $relativePath
 
         $destDir = Split-Path -Parent $destPath
@@ -1428,18 +2024,48 @@ function Copy-WorkflowTemplatesToRepo {
         $sourceFileToUse = $file.FullName
         $isTempFile      = $false
 
+        # Patch all shared workflow references (build/export/import/deploy/etc.) to the selected repository/ref.
+        if ($normalizedRelativePath -like '.github/workflows/*.yml') {
+            $content = Get-Content -LiteralPath $sourceFileToUse -Raw
+            $updatedContent = [Regex]::Replace(
+                $content,
+                'ALM4Dataverse/ALM4Dataverse/\.github/workflows/([A-Za-z0-9._-]+)@[A-Za-z0-9._/\-]+',
+                {
+                    param($m)
+                    return "$SharedWorkflowRepository/.github/workflows/$($m.Groups[1].Value)@$SharedWorkflowRef"
+                }
+            )
+
+            if ($updatedContent -ne $content) {
+                if ($isTempFile) {
+                    Set-Content -LiteralPath $sourceFileToUse -Value $updatedContent -NoNewline
+                }
+                else {
+                    $tempFile = [System.IO.Path]::GetTempFileName()
+                    Set-Content -LiteralPath $tempFile -Value $updatedContent -NoNewline
+                    $sourceFileToUse = $tempFile
+                    $isTempFile      = $true
+                }
+            }
+        }
+
         # Rename DEPLOY-main.yml to match the branch, and patch branch references
-        if ($relativePath -replace '\\','/' -eq '.github/workflows/DEPLOY-main.yml') {
+        if ($normalizedRelativePath -eq '.github/workflows/DEPLOY-main.yml') {
             $destPath = Join-Path $TargetRoot ".github/workflows/DEPLOY-$Branch.yml"
             
-            $content = Get-Content -LiteralPath $file.FullName -Raw
+            $content = Get-Content -LiteralPath $sourceFileToUse -Raw
             $content = $content -replace "branches:\s*\[\s*main\s*\]", "branches: [ $Branch ]"
             $content = $content -replace 'workflow_name: ''BUILD''', "workflow_name: 'BUILD'"
 
-            $tempFile = [System.IO.Path]::GetTempFileName()
-            Set-Content -LiteralPath $tempFile -Value $content -NoNewline
-            $sourceFileToUse = $tempFile
-            $isTempFile      = $true
+            if ($isTempFile) {
+                Set-Content -LiteralPath $sourceFileToUse -Value $content -NoNewline
+            }
+            else {
+                $tempFile = [System.IO.Path]::GetTempFileName()
+                Set-Content -LiteralPath $tempFile -Value $content -NoNewline
+                $sourceFileToUse = $tempFile
+                $isTempFile      = $true
+            }
         }
 
         try {
@@ -1529,17 +2155,45 @@ function Update-AlmConfigInRepoClone {
 Write-Section "Authenticating with GitHub"
 
 Write-Host "Checking GitHub CLI authentication status..." -ForegroundColor Yellow
-$ghStatus = & gh auth status 2>&1
-if ($LASTEXITCODE -ne 0) {
+$ghStatus = & gh auth status --hostname github.com 2>&1
+$hasExistingGitHubLogin = ($LASTEXITCODE -eq 0)
+
+if ($hasExistingGitHubLogin) {
+    $existingGhUser = (& gh api user --jq '.login' 2>&1 | Out-String).Trim()
+
+    $ghMenuItems = @()
+    if (-not [string]::IsNullOrWhiteSpace($existingGhUser)) {
+        $ghMenuItems += "Use existing GitHub login: $existingGhUser"
+    }
+    else {
+        $ghMenuItems += "Use existing GitHub login"
+    }
+    $ghMenuItems += "Sign in with a different GitHub account"
+
+    $ghChoice = Select-FromMenu -Title "GitHub authentication" -Items $ghMenuItems
+    if ($null -eq $ghChoice) {
+        throw "No GitHub authentication option selected."
+    }
+
+    if ($ghChoice -eq 0) {
+        Write-Host "Using existing GitHub login." -ForegroundColor Green
+        Write-Host ($ghStatus -join "`n") -ForegroundColor DarkGray
+    }
+    else {
+        Write-Host "Signing in with a different GitHub account..." -ForegroundColor Yellow
+        & gh auth logout --hostname github.com --yes 2>&1 | Out-Host
+        & gh auth login --web --hostname github.com
+        if ($LASTEXITCODE -ne 0) {
+            throw "GitHub authentication failed."
+        }
+    }
+}
+else {
     Write-Host "Not logged in to GitHub. Opening browser for authentication..." -ForegroundColor Yellow
     & gh auth login --web --hostname github.com
     if ($LASTEXITCODE -ne 0) {
         throw "GitHub authentication failed."
     }
-}
-else {
-    Write-Host "Already authenticated with GitHub." -ForegroundColor Green
-    Write-Host ($ghStatus -join "`n") -ForegroundColor DarkGray
 }
 
 # Get the authenticated username
@@ -1557,11 +2211,37 @@ Write-Host "When prompted, please log in with an account that has access to:" -F
 Write-Host "- Your Entra ID tenant (to manage App Registrations)" -ForegroundColor Green
 Write-Host "- Your Dataverse DEV environment (SYSTEM ADMINISTRATOR role)" -ForegroundColor Green
 Write-Host ""
-Read-Host "Press Enter to open browser for Azure authentication..."
+
+$cachedAzureAccounts = @(Get-AuthToken -ResourceUrl "https://graph.microsoft.com" -TenantId $TenantId -ListAccountsOnly)
+$preferredAzureUsername = $null
+$forceAzureInteractive = $false
+
+if ($cachedAzureAccounts.Count -gt 0) {
+    $azureAuthMenuItems = @($cachedAzureAccounts | ForEach-Object { "Use existing Azure login: $_" })
+    $azureAuthMenuItems += "Sign in with a different Azure account"
+
+    $azureAuthChoice = Select-FromMenu -Title "Azure authentication" -Items $azureAuthMenuItems
+    if ($null -eq $azureAuthChoice) {
+        throw "No Azure authentication option selected."
+    }
+
+    if ($azureAuthChoice -lt $cachedAzureAccounts.Count) {
+        $preferredAzureUsername = $cachedAzureAccounts[$azureAuthChoice]
+        Write-Host "Using cached Azure login: $preferredAzureUsername" -ForegroundColor Green
+    }
+    else {
+        $forceAzureInteractive = $true
+        Read-Host "Press Enter to open browser for Azure authentication..."
+    }
+}
+else {
+    Write-Host "No cached Azure login detected. Browser sign-in is required." -ForegroundColor Yellow
+    Read-Host "Press Enter to open browser for Azure authentication..."
+}
 
 $script:azureAuthResult = Invoke-WithErrorHandling -OperationName "Azure Authentication" -ScriptBlock {
     # Request a Graph token to confirm authentication works
-    $result = Get-AuthToken -ResourceUrl "https://graph.microsoft.com" -TenantId $TenantId
+    $result = Get-AuthToken -ResourceUrl "https://graph.microsoft.com" -TenantId $TenantId -PreferredUsername $preferredAzureUsername -ForceInteractive:$forceAzureInteractive
     if (-not $result -or -not $result.AccessToken) {
         throw "Failed to acquire an Azure access token."
     }
@@ -1577,24 +2257,60 @@ if ([string]::IsNullOrWhiteSpace($TenantId)) {
 }
 
 # ─────────────────────────────────────────────────────────────
+Write-Section "Ensuring Shared Workflow Repository"
+
+$upstreamWorkflowRepoFullName = Resolve-GitHubRepoFullNameFromSource -Source $upstreamRepo -Fallback 'ALM4Dataverse/ALM4Dataverse'
+$upstreamGitSource = Resolve-UpstreamGitRemoteSource -ConfiguredSource $upstreamRepo -GitHubFullName $upstreamWorkflowRepoFullName
+
+Write-Host "Upstream workflow source: $upstreamWorkflowRepoFullName" -ForegroundColor DarkGray
+Write-Host "Using ALM4Dataverse ref: $ALM4DataverseRef" -ForegroundColor DarkGray
+
+$sharedWorkflowRepo = Invoke-WithErrorHandling -OperationName "Ensuring shared workflow repository fork" -ScriptBlock {
+    Ensure-GitHubForkForSharedWorkflows `
+        -UpstreamFullName $upstreamWorkflowRepoFullName `
+        -ForkOwner $script:ghUser `
+        -UpstreamGitSource $upstreamGitSource `
+        -Reference $ALM4DataverseRef
+}
+
+$sharedWorkflowRepository = $sharedWorkflowRepo.nameWithOwner
+Write-Host "Shared workflow repository: $sharedWorkflowRepository" -ForegroundColor Green
+
+# ─────────────────────────────────────────────────────────────
 Write-Section "Select GitHub Repository"
 
 Write-Host "Fetching repositories you have write access to..." -ForegroundColor Yellow
 
 $repos = @(Get-GitHubRepoList)
+$selectedRepo = $null
 
-if ($repos.Count -eq 0) {
-    throw "No repositories found. Ensure your account has write access to at least one repository."
+$repos = @($repos | Sort-Object -Property nameWithOwner)
+$repoMenuItems = @()
+$repoMenuActions = @()
+
+foreach ($repo in $repos) {
+    $repoMenuItems += "Use existing repository: $($repo.nameWithOwner)"
+    $repoMenuActions += @{ Type = 'UseExisting'; Repo = $repo }
 }
 
-$repoNames = @($repos | ForEach-Object { $_.nameWithOwner })
-$repoIndex = Select-FromMenu -Title "Select the repository to set up ALM4Dataverse in" -Items $repoNames
+$repoMenuItems += 'Create a new repository'
+$repoMenuActions += @{ Type = 'CreateNew' }
 
-if ($null -eq $repoIndex) {
+$repoSelection = Select-FromMenu -Title "Select the repository to set up ALM4Dataverse in" -Items $repoMenuItems
+if ($null -eq $repoSelection) {
     throw "No repository selected."
 }
 
-$selectedRepo = $repos[$repoIndex]
+$repoAction = $repoMenuActions[$repoSelection]
+if ($repoAction.Type -eq 'UseExisting') {
+    $selectedRepo = $repoAction.Repo
+}
+else {
+    $selectedRepo = Invoke-WithErrorHandling -OperationName "Creating GitHub repository" -ScriptBlock {
+        New-GitHubRepositoryInteractive -DefaultOwner $script:ghUser
+    }
+}
+
 $repoOwner    = $selectedRepo.owner.login
 $repoName     = $selectedRepo.name
 $repoFullName = $selectedRepo.nameWithOwner
@@ -1644,7 +2360,7 @@ try {
 
         try {
             & git clone --depth 1 --branch $ALM4DataverseRef `
-                "https://github.com/ALM4Dataverse/ALM4Dataverse.git" `
+                $upstreamGitSource `
                 $upstreamClone 2>&1 | Out-Host
             if ($LASTEXITCODE -ne 0) { throw "Failed to clone ALM4Dataverse templates." }
             $copyRoot = Join-Path $upstreamClone 'copy-to-your-repo'
@@ -1655,7 +2371,12 @@ try {
     }
 
     Invoke-WithErrorHandling -OperationName "Copying workflow templates" -ScriptBlock {
-        Copy-WorkflowTemplatesToRepo -SourceRoot $copyRoot -TargetRoot $cloneRoot -Branch $defaultBranch
+        Copy-WorkflowTemplatesToRepo `
+            -SourceRoot $copyRoot `
+            -TargetRoot $cloneRoot `
+            -Branch $defaultBranch `
+            -SharedWorkflowRepository $sharedWorkflowRepository `
+            -SharedWorkflowRef $ALM4DataverseRef
     } | Out-Null
 
     # ─────────────────────────────────────────────────────────

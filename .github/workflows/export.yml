@@ -144,16 +144,11 @@ jobs:
             Write-Host "Client secret provided — using client secret authentication"
           }
 
-      - name: Install Dependencies
+      - name: Install Dependencies, Connect and Export
         shell: pwsh
         working-directory: ${{ github.workspace }}/self
         run: |
           & "${{ github.workspace }}/alm/pipelines/scripts/installdependencies.ps1"
-
-      - name: Connect and Export
-        shell: pwsh
-        working-directory: ${{ github.workspace }}/self
-        run: |
           $devEnvLabel = '${{ inputs.dev-environment-label }}'
           if ([string]::IsNullOrEmpty($devEnvLabel)) {
             $devEnvLabel = "Dev-${{ github.ref_name }}"

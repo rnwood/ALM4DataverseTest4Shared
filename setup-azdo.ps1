@@ -474,7 +474,10 @@ function Get-AuthToken {
     param(
         [Parameter(Mandatory)][string]$ResourceUrl,
         [Parameter()][string]$TenantId,
-        [Parameter()][string]$ClientId = '1950a258-227b-4e31-a9cf-717495945fc2' # Azure PowerShell Client ID
+        [Parameter()][string]$ClientId = '1950a258-227b-4e31-a9cf-717495945fc2', # Azure PowerShell Client ID
+        [Parameter()][switch]$ForceInteractive,
+        [Parameter()][string]$PreferredUsername,
+        [Parameter()][switch]$ListAccountsOnly
     )
 
     # Try to load the assembly using LoadWithPartialName as requested
@@ -554,13 +557,28 @@ function Get-AuthToken {
         Set-Variable -Name "MsalApp" -Value $app -Scope Script
     }
 
-    $accounts = $app.GetAccountsAsync().GetAwaiter().GetResult()
-    $account = $accounts | Select-Object -First 1
+    $accounts = @($app.GetAccountsAsync().GetAwaiter().GetResult())
+
+    if ($ListAccountsOnly) {
+        return @($accounts | ForEach-Object { $_.Username } | Where-Object { -not [string]::IsNullOrWhiteSpace($_) } | Select-Object -Unique)
+    }
+
+    $account = $null
+    if (-not [string]::IsNullOrWhiteSpace($PreferredUsername)) {
+        $account = $accounts | Where-Object { $_.Username -ieq $PreferredUsername } | Select-Object -First 1
+        if (-not $account) {
+            Write-Host "Preferred cached Azure login '$PreferredUsername' was not found; using the default cached account selection." -ForegroundColor Yellow
+        }
+    }
+
+    if (-not $account) {
+        $account = $accounts | Select-Object -First 1
+    }
 
     $authResult = $null
 
     try {
-        if ($account) {
+        if (-not $ForceInteractive -and $account) {
             $authResult = $app.AcquireTokenSilent($scopes, $account).ExecuteAsync().GetAwaiter().GetResult()
         }
     }
@@ -570,7 +588,17 @@ function Get-AuthToken {
 
     if (-not $authResult) {
         try {
-            $authResult = $app.AcquireTokenInteractive($scopes).ExecuteAsync().GetAwaiter().GetResult()
+            $interactiveBuilder = $app.AcquireTokenInteractive($scopes)
+
+            if ($ForceInteractive) {
+                $interactiveBuilder = $interactiveBuilder.WithPrompt([Microsoft.Identity.Client.Prompt]::SelectAccount)
+            }
+
+            if (-not [string]::IsNullOrWhiteSpace($PreferredUsername)) {
+                $interactiveBuilder = $interactiveBuilder.WithLoginHint($PreferredUsername)
+            }
+
+            $authResult = $interactiveBuilder.ExecuteAsync().GetAwaiter().GetResult()
         }
         catch {
             Write-Error "Failed to acquire token interactively: $_"
@@ -589,14 +617,39 @@ Write-Host "When prompted, please log in with an account that has access to:" -F
 Write-Host "- Your Azure DevOps organization/project (PROJECT administrator role for existing project, ORGANISATION OWNER role if you want to create a new project)" -ForegroundColor Green
 Write-Host "- Your Dataverse DEV environment (SYSTEM ADMINISTRATOR role)" -ForegroundColor Green
 Write-Host ""
-Read-Host "Press Enter to open browser for authentication..."
-
 
 # Azure DevOps resource for AAD token acquisition.
 $adoResourceUrl = '499b84ac-1321-427f-aa17-267ca6975798'
 
+$cachedAzureAccounts = @(Get-AuthToken -ResourceUrl $adoResourceUrl -TenantId $TenantId -ListAccountsOnly)
+$preferredAzureUsername = $null
+$forceAzureInteractive = $false
+
+if ($cachedAzureAccounts.Count -gt 0) {
+    $azureAuthMenuItems = @($cachedAzureAccounts | ForEach-Object { "Use existing Azure login: $_" })
+    $azureAuthMenuItems += "Sign in with a different Azure account"
+
+    $azureAuthChoice = Select-FromMenu -Title "Azure authentication" -Items $azureAuthMenuItems
+    if ($null -eq $azureAuthChoice) {
+        throw "No Azure authentication option selected."
+    }
+
+    if ($azureAuthChoice -lt $cachedAzureAccounts.Count) {
+        $preferredAzureUsername = $cachedAzureAccounts[$azureAuthChoice]
+        Write-Host "Using cached Azure login: $preferredAzureUsername" -ForegroundColor Green
+    }
+    else {
+        $forceAzureInteractive = $true
+        Read-Host "Press Enter to open browser for authentication..."
+    }
+}
+else {
+    Write-Host "No cached Azure login detected. Browser sign-in is required." -ForegroundColor Yellow
+    Read-Host "Press Enter to open browser for authentication..."
+}
+
 $authResult = Invoke-WithErrorHandling -OperationName "Authentication" -ScriptBlock {
-    $result = Get-AuthToken -ResourceUrl $adoResourceUrl -TenantId $TenantId
+    $result = Get-AuthToken -ResourceUrl $adoResourceUrl -TenantId $TenantId -PreferredUsername $preferredAzureUsername -ForceInteractive:$forceAzureInteractive
     
     if (-not $result -or -not $result.AccessToken) {
         throw "Failed to acquire an Azure DevOps access token."
