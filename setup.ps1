@@ -864,7 +864,7 @@ Write-Host "VSTeam configured for organization '$orgName' using a bearer token."
 Write-Section "Ensuring Needed Extensions are Enabled"
 
 # ALM4Dataverse extension mode is required for WIF flow.
-$script:useAlm4DataverseExtension = Read-YesNo -Prompt "Use ALM4Dataverse AzDO extension for connection variable resolution? (required for Workload Identity Federation)"
+$script:useAlm4DataverseExtension = Read-YesNo -Prompt "Use ALM4Dataverse AzDO extension? (required for Workload Identity Federation)"
 if (-not $script:useAlm4DataverseExtension) {
     Write-Host "ALM4Dataverse extension mode disabled. Setup will use the PPBT Set Connection Variables task for service-connection-based client secret auth." -ForegroundColor Yellow
 }
