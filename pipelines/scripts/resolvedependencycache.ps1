@@ -3,11 +3,11 @@
     Resolves GitHub Actions dependency cache keys from ALM configuration.
 .DESCRIPTION
     Reads alm-config.psd1 (merged with defaults) and optional scriptDependencies.lock.json
-    to determine whether dependency caching is safe.
+    and produces deterministic cache keys from requested dependency version
+    specifiers.
 
-    Caching is enabled only for exact pinned versions:
-    - Module versions must be exact (e.g. 1.2.3 or 1.2.3-preview.1)
-    - PAC CLI version must be exact (same format)
+    Caching is based on the requested specifiers (including floating values like
+    '' / latest and 'prerelease').
 
     Output variables are written to GITHUB_OUTPUT:
     - module_cache_enabled (true/false)
@@ -26,22 +26,17 @@ param(
 
 $ErrorActionPreference = 'Stop'
 
-function Test-IsPinnedVersionSpecifier {
+function Normalize-VersionSpecifier {
     param(
         [Parameter(Mandatory = $false)]
         [string]$Value
     )
 
     if ([string]::IsNullOrWhiteSpace($Value)) {
-        return $false
+        return 'latest'
     }
 
-    $trimmed = $Value.Trim()
-    if ($trimmed -eq 'prerelease') {
-        return $false
-    }
-
-    return ($trimmed -match '^\d+\.\d+\.\d+(?:-[0-9A-Za-z][0-9A-Za-z\.-]*)?$')
+    return $Value.Trim().ToLowerInvariant()
 }
 
 function Get-HashHex {
@@ -107,19 +102,11 @@ else {
 $moduleSpecs = @{}
 if ($config.scriptDependencies -is [hashtable]) {
     foreach ($name in ($config.scriptDependencies.Keys | Sort-Object)) {
-        $moduleSpecs[$name] = [string]$config.scriptDependencies[$name]
+        $moduleSpecs[$name] = Normalize-VersionSpecifier -Value ([string]$config.scriptDependencies[$name])
     }
 }
 
 $moduleCacheEnabled = $moduleSpecs.Count -gt 0
-if ($moduleCacheEnabled) {
-    foreach ($entry in $moduleSpecs.GetEnumerator()) {
-        if (-not (Test-IsPinnedVersionSpecifier -Value $entry.Value)) {
-            $moduleCacheEnabled = $false
-            break
-        }
-    }
-}
 
 $moduleCacheKey = ''
 $runnerOs = if ([string]::IsNullOrWhiteSpace($env:RUNNER_OS)) { 'unknown' } else { $env:RUNNER_OS }
@@ -132,7 +119,7 @@ if ($moduleCacheEnabled) {
     Write-Host "Module cache enabled with key: $moduleCacheKey"
 }
 else {
-    Write-Host "Module cache disabled (no modules configured or one or more versions are not exact pins)."
+    Write-Host "Module cache disabled (no modules configured)."
 }
 
 $pacVersion = ''
@@ -140,15 +127,16 @@ if ($config.ContainsKey('pacCliVersion') -and $null -ne $config.pacCliVersion) {
     $pacVersion = [string]$config.pacCliVersion
 }
 
-$pacCacheEnabled = Test-IsPinnedVersionSpecifier -Value $pacVersion
+$pacSpec = Normalize-VersionSpecifier -Value $pacVersion
+$pacCacheEnabled = $true
 $pacCacheKey = ''
 if ($pacCacheEnabled) {
-    $pacStamp = "Microsoft.PowerApps.CLI.Tool=$pacVersion"
+    $pacStamp = "Microsoft.PowerApps.CLI.Tool=$pacSpec"
     $pacCacheKey = "alm4dataverse-$runnerOs-paccli-$(Get-HashHex -Value $pacStamp)"
     Write-Host "PAC CLI cache enabled with key: $pacCacheKey"
 }
 else {
-    Write-Host "PAC CLI cache disabled (version is not an exact pin)."
+    Write-Host "PAC CLI cache disabled."
 }
 
 Write-StepOutput -Name 'module_cache_enabled' -Value ($moduleCacheEnabled.ToString().ToLowerInvariant())
