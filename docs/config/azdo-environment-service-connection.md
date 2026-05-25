@@ -68,10 +68,9 @@ See [Service Principal Setup](../setup/azdo-manual-setup.md#4-service-principal-
 
 ### Security
 
-- **System Administrator Role**: Assign the System Administrator security role to the application user in each Dataverse environment to allow solution import and export
-- **Dedicated Service Principals**: Create separate service principals for each environment (e.g., separate app registrations for Dev, TEST, UAT, and PROD)
-- **Client Secret Rotation**: Rotate client secrets periodically and track expiration dates to prevent authentication failures
-### Organization
+- **System Administrator Role**: Assign the System Administrator security role to the application user in each Dataverse environment to allow solution import and export.
+- **Dedicated Service Principals**: Create separate service principals for each environment (e.g. separate app registrations for Dev, TEST, UAT, and PROD).
+- **Client Secret Rotation**: Rotate client secrets periodically and track expiration dates to prevent authentication failures.
 
 ## Reference
 

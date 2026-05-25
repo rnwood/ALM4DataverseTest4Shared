@@ -3,7 +3,7 @@
 This guide describes how to set up ALM4Dataverse for use with GitHub Actions.
 
 > **Automated setup**: For most users, the easiest option is to run `setup-github.ps1` which automates
-> all of the steps below. See the [GitHub Actions Automated Setup Guide](github-automated-setup.md).
+> all of the steps below. See [GitHub Variables & Secrets](github-variables.md) for the credential configuration reference.
 
 > `setup-github.ps1` automatically selects deployment mode per repository:
 > - Uses GitHub environments + approvals + `promotion-mode: environment-approval` when supported.

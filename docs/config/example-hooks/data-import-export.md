@@ -37,7 +37,7 @@ Get-DataverseRecord -TableName new_anotherconfigtable |
 
 When `EXPORT` runs, a folder will be created, with a JSON file representing each record. 
 
-The filename is the ID of the record. For some records (for example Teams automatically created when Business Units are created) this is an unstable system generated value. You can specify a list of column names to `-idproperties` to use these instead. For example  `-idproperties new_name` or  `-idproperties firstname, lastname`
+The filename is the ID of the record. For some records (for example Teams automatically created when Business Units are created) this is an unstable system-generated value. You can specify a list of column names to `-idproperties` to use these instead. For example  `-idproperties new_name` or  `-idproperties firstname, lastname`
 
 `-withdeletions` is optional. It records the records you've deleted in a subfolder called `deletions` so you can take action to mirror this as deletions or deactivations. See the section below for options when processing these.
 
@@ -69,6 +69,6 @@ The first phase creates or updates records.
 
 The standard process will upsert records matching them to existing records on the primary ID. This can be varied with the `-matchon` option for `Set-DataverseRecord`. For example `-matchon firstname, lastname`.
 
-The second phase deals with any records that have been removed from the source. You can either delete them, deactivate them (and/or add custom logic to rename them with a prefix for example).
+The second phase deals with any records that have been removed from the source. You can either delete them, deactivate them, or add custom logic to rename them with a prefix.
 
 

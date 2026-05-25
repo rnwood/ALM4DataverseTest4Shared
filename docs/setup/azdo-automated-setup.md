@@ -42,9 +42,9 @@ You will need to be 'Project Collection Administrator' if you want the automated
 
 ### 3) Entra ID Applications for each environment
 
-> ** Application best practice**
-> Use a separate application for each environment (or at least NONPROD and PROD) to keep proper separation between environments.
-> Since there's no cost to these applications, there isn't a big overhead of doing this.
+> **Application best practice**
+> Use a separate application for each environment (or at least one for non-production and one for production) to keep proper separation between environments.
+> There is no cost to these applications, so there is no significant overhead in doing this.
 
 ## Running Setup
 
@@ -52,23 +52,23 @@ The easiest way to run setup is:
 
 1) Open "Windows PowerShell" from the start menu (every Windows computer has this installed)
 
-2) Paste this in and hit enter.
+2) Paste this in and press Enter.
 
    ```powershell
    iwr https://github.com/ALM4Dataverse/ALM4Dataverse/releases/latest/download/setup-azdo.ps1 | iex
    ```
 
-   > If you would like to review the script first (good practice) you can download the script and save it from https://github.com/ALM4Dataverse/ALM4Dataverse/releases/latest/download/setup-azdo.ps1
+   > If you would like to review the script first (good practice), you can download it from https://github.com/ALM4Dataverse/ALM4Dataverse/releases/latest/download/setup-azdo.ps1
 
-3) Follow the instructions.
+3) Follow the on-screen instructions.
 
 ## What Setup Does
 
-1) Prompts you to authenticate. The account you select will be used when connecting to AzDO and Dataverse environments during setup. 
-2) Ensures the required Power Platform AzDO Extension is installed in the target AzDO.
-   If you have the required level of access it will be enabled automatically.
+1) Prompts you to authenticate. The account you select will be used when connecting to AzDO and Dataverse environments during setup.
+2) Ensures the required Power Platform AzDO Extension is installed in the target AzDO organisation.
+   If you have the required level of access, it will be enabled automatically.
    Pipeline execution still uses the pinned `pacCliVersion` installed by `installdependencies.ps1` (the templates keep PPBT `AddToolsToPath` disabled).
-3) Prompts whether to use the ALM4Dataverse extension task for connection-variable resolution.
+3) Prompts you whether to use the ALM4Dataverse extension task for connection-variable resolution.
    - If enabled, setup can use either client secret or workload identity federation authentication.
    - If disabled, setup configures pipelines to use the Power Platform Build Tools **Set Connection Variables** task with service-principal secret auth.
 4) Prompts you to select an existing AzDO project, or create a new one.
@@ -77,10 +77,10 @@ The easiest way to run setup is:
 6) Prompts you to select the Git repo in the AzDO project or create a new one and creates the required pipelines files and registrations.
 7) Prompts you to select a Dataverse environment to be used as the main development environment and creates the required variable groups and service connections.
 8) Prompts you to select the solutions to be managed in dependency order and edits the `alm-config.psd1` file
-9) Prompts you to select Dataverse environments to be used as the deployment targets (your test and prod environment) and creates the required variable groups and service connections.
-10) For both the dev environment and all deployment environments prompts you to select the Entra ID application (service principal) you want to use, with an option to create automatically.
+9) Prompts you to select Dataverse environments to be used as the deployment targets (your test and production environments) and creates the required variable groups and service connections.
+10) For both the dev environment and all deployment environments, prompts you to select the Entra ID application (service principal) you want to use, with an option to create one automatically.
 11) For each selected service principal, prompts you to choose the authentication type:
      - **Service Principal with Secret**: Traditional approach using client secrets
      - **Workload Identity Federation**: Modern approach using federated credentials (no secrets required)
-    - When ALM4Dataverse extension mode is disabled, only **Service Principal with Secret** is available.
-12) For both the dev environment and all deployment environments prompts you to select the Service Account (user account) you want to use. This must be pre-existing as no option to create it is given.
+     - When ALM4Dataverse extension mode is disabled, only **Service Principal with Secret** is available.
+12) For both the dev environment and all deployment environments, prompts you to select the Service Account (user account) you want to use. This must be pre-existing as no option to create one is provided.

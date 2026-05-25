@@ -26,7 +26,7 @@ Alternatively, you can configure your organisation with at least one paid "paral
 
 ## Extensions
 
-## Power Platform Build Tools
+### Power Platform Build Tools
 
 The Power Platform Build Tools extension is required for the pipelines to work.
 

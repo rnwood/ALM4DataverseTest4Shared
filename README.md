@@ -46,13 +46,13 @@ Features:
 
 ## Documentation
 
-- [Frequently asked question](docs/faqs.md)
+- [Frequently Asked Questions](docs/faqs.md)
 
 ### Initial Setup
 
 #### GitHub Actions
 - [GitHub Actions Setup Guide](docs/setup/github-setup.md)
-- [GitHub Actions Automated Setup](docs/setup/github-automated-setup.md)
+- [GitHub Variables & Secrets](docs/setup/github-variables.md)
 
 #### Azure DevOps
 - [Azure DevOps Organization Requirements](docs/setup/azdo-organisation-requirements.md)
@@ -65,7 +65,7 @@ Features:
   Capturing changes from your dev environments into source control.
 - [Building releases](docs/usage/building-releases.md) - `BUILD` pipeline/workflow
   Generating release assets for later deployment.
-- [Deploying](docs/usage/deploying.md) -`DEPLOY-<branchname>` pipeline/workflow
+- [Deploying](docs/usage/deploying.md) - `DEPLOY-<branchname>` pipeline/workflow
   Deploying release assets to environments in a controlled sequence
 - [Importing changes](docs/usage/importing-changes.md) - `IMPORT` pipeline/workflow
   Seeding or updating dev environment from source control.
@@ -83,5 +83,5 @@ Features:
 
 #### Example 'Hook' Extensions
 
-- [Data import and export](config/example-hooks/data-import-export.md) (for example config/system data)
-- [Organization/environment settings](config/example-hooks/organization-settings.md) (for example enabling the 'PCF allowed' switch)
+- [Data import and export](docs/config/example-hooks/data-import-export.md) (for example config/system data)
+- [Organisation/environment settings](docs/config/example-hooks/organization-settings.md) (for example enabling the 'PCF allowed' switch)
