@@ -2967,7 +2967,7 @@ else {
                 [void](Add-EntraIdFederatedCredential `
                     -ApplicationObjectId $creds.ApplicationObjectId `
                     -TenantId $TenantId `
-                    -Subject "repo:$repoFullName`:environment:$env.ShortName" `
+                    -Subject "repo:${repoFullName}:environment:$($env.ShortName)" `
                     -CredentialName $credName)
             }
 
