@@ -722,10 +722,14 @@ function Set-GitHubEnvironmentSecret {
 
     Write-Host "Setting secret '$SecretName' in environment '$EnvironmentName'..." -ForegroundColor DarkGray
 
-    $result = $SecretValue | & gh secret set $SecretName `
+    # Avoid piping to native commands here: PowerShell appends a trailing newline
+    # when sending strings over stdin, which would corrupt client secret values.
+    $normalizedSecretValue = ($SecretValue -replace "[\r\n]+$", "")
+
+    $result = & gh secret set $SecretName `
         --repo "$Owner/$Repo" `
         --env $EnvironmentName `
-        --body - 2>&1
+        --body $normalizedSecretValue 2>&1
 
     if ($LASTEXITCODE -ne 0) {
         throw "Failed to set secret '$SecretName': $($result -join "`n")"
@@ -775,9 +779,13 @@ function Set-GitHubRepoSecret {
 
     Write-Host "Setting repo-level secret '$SecretName'..." -ForegroundColor DarkGray
 
-    $result = $SecretValue | & gh secret set $SecretName `
+    # Avoid piping to native commands here: PowerShell appends a trailing newline
+    # when sending strings over stdin, which would corrupt client secret values.
+    $normalizedSecretValue = ($SecretValue -replace "[\r\n]+$", "")
+
+    $result = & gh secret set $SecretName `
         --repo "$Owner/$Repo" `
-        --body - 2>&1
+        --body $normalizedSecretValue 2>&1
 
     if ($LASTEXITCODE -ne 0) {
         throw "Failed to set repo secret '$SecretName': $($result -join "`n")"
