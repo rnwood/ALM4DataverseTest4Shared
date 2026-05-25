@@ -2,21 +2,21 @@
 
 <#
 .SYNOPSIS
-    Script to prepare setup.ps1 for release
-    This extracts the release logic from the GitHub workflow for testability
+    Prepares setup-azdo.ps1 and setup-github.ps1 for release.
+    This extracts the release logic from the GitHub workflow for testability.
 
 .DESCRIPTION
-    Processes setup.ps1 by replacing placeholders with actual values for a release.
-    This script can be run locally to test the release preparation process.
+    Processes setup-azdo.ps1 and setup-github.ps1 by replacing placeholders with actual values for
+    a release. This script can be run locally to test the release preparation process.
 
 .PARAMETER TagName
     The release tag (e.g., v1.0.0)
 
 .PARAMETER OutputDir
-    Directory where the processed setup.ps1 will be written
+    Directory where the processed scripts will be written
 
 .PARAMETER UpstreamRepo
-    (Optional) URL of the upstream repository. Defaults to https://github.com/rnwood/ALM4Dataverse.git
+    (Optional) URL of the upstream repository. Defaults to https://github.com/ALM4Dataverse/ALM4Dataverse.git
 
 .EXAMPLE
     .\prepare-release.ps1 -TagName v1.2.3 -OutputDir ./release
@@ -34,7 +34,7 @@ param(
     [string]$OutputDir,
 
     [Parameter(Position = 2)]
-    [string]$UpstreamRepo = 'https://github.com/rnwood/ALM4Dataverse.git'
+    [string]$UpstreamRepo = 'https://github.com/ALM4Dataverse/ALM4Dataverse.git'
 )
 
 Set-StrictMode -Version Latest
@@ -44,7 +44,7 @@ $ErrorActionPreference = 'Stop'
 $ScriptDir = $PSScriptRoot
 
 Write-Host "==========================================" -ForegroundColor Cyan
-Write-Host "Preparing setup.ps1 for release" -ForegroundColor Cyan
+Write-Host "Preparing setup scripts for release" -ForegroundColor Cyan
 Write-Host "==========================================" -ForegroundColor Cyan
 Write-Host ""
 Write-Host "Configuration:"
@@ -91,94 +91,107 @@ catch {
 
 Write-Host ""
 
-# Step 2: Process setup.ps1 and replace placeholders
-Write-Host "Step 2: Processing setup.ps1..." -ForegroundColor Yellow
-
-$SetupFile = Join-Path $ScriptDir 'setup.ps1'
-if (-not (Test-Path $SetupFile)) {
-    Write-Host "ERROR: Setup file not found: $SetupFile" -ForegroundColor Red
-    exit 1
-}
-
-# Define placeholders
-$Alm4DataverseRefPlaceholder = '__ALM4DATAVERSE_REF__'
+# Define placeholders used in both setup scripts
+$Alm4DataverseRefPlaceholder       = '__ALM4DATAVERSE_REF__'
 $RnwoodDataverseVersionPlaceholder = '__RNWOOD_DATAVERSE_VERSION__'
-$UpstreamRepoPlaceholder = '__UPSTREAM_REPO__'
+$UpstreamRepoPlaceholder           = '__UPSTREAM_REPO__'
 
 # Create output directory
 if (-not (Test-Path $OutputDir)) {
     New-Item -ItemType Directory -Path $OutputDir -Force | Out-Null
 }
 
-$OutputFile = Join-Path $OutputDir 'setup.ps1'
+# Helper: process a single setup script
+function Invoke-ProcessSetupScript {
+    param(
+        [Parameter(Mandatory)][string]$SourceFile,
+        [Parameter(Mandatory)][string]$OutputFile,
+        [Parameter(Mandatory)][string]$ScriptLabel,
+        [Parameter()][string[]]$PlaceholdersToVerify
+    )
 
-# Read the setup file
-try {
-    $setupContent = Get-Content -Path $SetupFile -Raw
-}
-catch {
-    Write-Host "ERROR: Could not read setup file: $SetupFile" -ForegroundColor Red
-    Write-Host "  Details: $($_.Exception.Message)" -ForegroundColor Red
-    exit 1
-}
+    Write-Host "Processing $ScriptLabel..." -ForegroundColor Yellow
 
-# Replace placeholders
-$setupContent = $setupContent -replace [regex]::Escape($Alm4DataverseRefPlaceholder), $TagName
-$setupContent = $setupContent -replace [regex]::Escape($RnwoodDataverseVersionPlaceholder), $DataverseVersion
-$setupContent = $setupContent -replace [regex]::Escape($UpstreamRepoPlaceholder), $UpstreamRepo
-
-# Write to output file
-try {
-    Set-Content -Path $OutputFile -Value $setupContent -NoNewline
-}
-catch {
-    Write-Host "ERROR: Could not write to output file: $OutputFile" -ForegroundColor Red
-    Write-Host "  Details: $($_.Exception.Message)" -ForegroundColor Red
-    exit 1
-}
-
-Write-Host "  Processed setup.ps1 with:" -ForegroundColor Green
-Write-Host "    ALM4DATAVERSE_REF: $TagName"
-Write-Host "    RNWOOD_DATAVERSE_VERSION: $DataverseVersion"
-Write-Host "    UPSTREAM_REPO: $UpstreamRepo"
-Write-Host ""
-
-# Step 3: Verify placeholders were replaced
-Write-Host "Step 3: Verifying placeholder replacement..." -ForegroundColor Yellow
-
-$outputContent = Get-Content -Path $OutputFile -Raw
-$remainingPlaceholders = @()
-
-if ($outputContent -match [regex]::Escape($Alm4DataverseRefPlaceholder)) {
-    $remainingPlaceholders += $Alm4DataverseRefPlaceholder
-}
-if ($outputContent -match [regex]::Escape($RnwoodDataverseVersionPlaceholder)) {
-    $remainingPlaceholders += $RnwoodDataverseVersionPlaceholder
-}
-if ($outputContent -match [regex]::Escape($UpstreamRepoPlaceholder)) {
-    $remainingPlaceholders += $UpstreamRepoPlaceholder
-}
-
-if ($remainingPlaceholders.Count -gt 0) {
-    Write-Host "ERROR: Placeholders were not fully replaced!" -ForegroundColor Red
-    Write-Host "Remaining placeholders:" -ForegroundColor Red
-    foreach ($placeholder in $remainingPlaceholders) {
-        Write-Host "  - $placeholder" -ForegroundColor Red
+    if (-not (Test-Path $SourceFile)) {
+        Write-Host "ERROR: Source file not found: $SourceFile" -ForegroundColor Red
+        exit 1
     }
-    exit 1
+
+    try {
+        $content = Get-Content -Path $SourceFile -Raw
+    }
+    catch {
+        Write-Host "ERROR: Could not read $SourceFile`: $($_.Exception.Message)" -ForegroundColor Red
+        exit 1
+    }
+
+    # Replace all known placeholders (scripts that don't use a placeholder simply won't be affected)
+    $content = $content -replace [regex]::Escape($Alm4DataverseRefPlaceholder),       $TagName
+    $content = $content -replace [regex]::Escape($RnwoodDataverseVersionPlaceholder), $DataverseVersion
+    $content = $content -replace [regex]::Escape($UpstreamRepoPlaceholder),           $UpstreamRepo
+
+    try {
+        Set-Content -Path $OutputFile -Value $content -NoNewline
+    }
+    catch {
+        Write-Host "ERROR: Could not write $OutputFile`: $($_.Exception.Message)" -ForegroundColor Red
+        exit 1
+    }
+
+    Write-Host "  Processed $ScriptLabel with:" -ForegroundColor Green
+    Write-Host "    ALM4DATAVERSE_REF:        $TagName"
+    Write-Host "    RNWOOD_DATAVERSE_VERSION: $DataverseVersion"
+    Write-Host "    UPSTREAM_REPO:            $UpstreamRepo"
+    Write-Host ""
+
+    # Verify that the required placeholders were replaced
+    $outContent = Get-Content -Path $OutputFile -Raw
+    $remaining  = @()
+
+    foreach ($ph in $PlaceholdersToVerify) {
+        if ($outContent -match [regex]::Escape($ph)) {
+            $remaining += $ph
+        }
+    }
+
+    if ($remaining.Count -gt 0) {
+        Write-Host "ERROR: Placeholders were not fully replaced in $ScriptLabel!" -ForegroundColor Red
+        foreach ($ph in $remaining) {
+            Write-Host "  - $ph" -ForegroundColor Red
+        }
+        exit 1
+    }
+
+    Write-Host "  ✓ All placeholders replaced in $ScriptLabel" -ForegroundColor Green
+    Write-Host ""
 }
 
-Write-Host "  ✓ All placeholders replaced successfully" -ForegroundColor Green
-Write-Host ""
+# Step 2: Process setup-azdo.ps1
+Write-Host "Step 2: Processing setup-azdo.ps1 ..." -ForegroundColor Yellow
+Invoke-ProcessSetupScript `
+    -SourceFile  (Join-Path $ScriptDir 'setup-azdo.ps1') `
+    -OutputFile  (Join-Path $OutputDir 'setup-azdo.ps1') `
+    -ScriptLabel 'setup-azdo.ps1' `
+    -PlaceholdersToVerify @($Alm4DataverseRefPlaceholder, $RnwoodDataverseVersionPlaceholder, $UpstreamRepoPlaceholder)
+
+# Step 3: Process setup-github.ps1
+Write-Host "Step 3: Processing setup-github.ps1 ..." -ForegroundColor Yellow
+Invoke-ProcessSetupScript `
+    -SourceFile  (Join-Path $ScriptDir 'setup-github.ps1') `
+    -OutputFile  (Join-Path $OutputDir 'setup-github.ps1') `
+    -ScriptLabel 'setup-github.ps1' `
+    -PlaceholdersToVerify @($Alm4DataverseRefPlaceholder, $RnwoodDataverseVersionPlaceholder)
 
 # Step 4: Display summary
 Write-Host "==========================================" -ForegroundColor Cyan
 Write-Host "✓ Release preparation complete" -ForegroundColor Cyan
 Write-Host "==========================================" -ForegroundColor Cyan
 Write-Host ""
-Write-Host "Output file: $OutputFile"
+Write-Host "Output files:"
+Write-Host "  $(Join-Path $OutputDir 'setup-azdo.ps1')"
+Write-Host "  $(Join-Path $OutputDir 'setup-github.ps1')"
 Write-Host ""
 Write-Host "Next steps:"
-Write-Host "  1. Review the processed file"
-Write-Host "  2. Upload to GitHub release as an asset"
+Write-Host "  1. Review the processed files"
+Write-Host "  2. Upload to GitHub release as assets"
 Write-Host ""

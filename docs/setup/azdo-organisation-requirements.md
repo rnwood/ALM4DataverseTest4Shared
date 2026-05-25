@@ -28,7 +28,11 @@ Alternatively, you can configure your organisation with at least one paid "paral
 
 ## Power Platform Build Tools
 
-The Power Platform Build Tools extension is required for the pipelines to work. It provides the PAC CLI.
+The Power Platform Build Tools extension is required for the pipelines to work.
+
+ALM4Dataverse installs `pac` in the pipeline via `installdependencies.ps1` and pins the version with `pacCliVersion` from `alm-config.psd1` / `alm-config-defaults.psd1`.
+
+In the shipped Azure DevOps templates, `PowerPlatformToolInstaller@2` is configured with `AddToolsToPath: false` to avoid the PPBT-provided `pac` version overriding the pinned one.
 
 1. Navigate to the Azure DevOps Marketplace: [Power Platform Build Tools](https://marketplace.visualstudio.com/items?itemName=microsoft-IsvExpTools.PowerPlatform-BuildTools)
 2. Click "Get it free"

@@ -1,6 +1,6 @@
 # Automated Setup
 
-> If you are unable to use the automated setup process, you can follow the instructions in the [manual setup guide](manual-setup.md).
+> If you are unable to use the automated setup process, you can follow the instructions in the [manual setup guide](azdo-manual-setup.md).
 
 ## Limitations
 
@@ -55,10 +55,10 @@ The easiest way to run setup is:
 2) Paste this in and hit enter.
 
    ```powershell
-   iwr https://github.com/rnwood/ALM4Dataverse/releases/latest/download/setup.ps1 | iex
+   iwr https://github.com/ALM4Dataverse/ALM4Dataverse/releases/latest/download/setup-azdo.ps1 | iex
    ```
 
-   > If you would like to review the script first (good practice) you can download the script and save it from https://github.com/rnwood/ALM4Dataverse/releases/latest/download/setup.ps1
+   > If you would like to review the script first (good practice) you can download the script and save it from https://github.com/ALM4Dataverse/ALM4Dataverse/releases/latest/download/setup-azdo.ps1
 
 3) Follow the instructions.
 
@@ -67,6 +67,7 @@ The easiest way to run setup is:
 1) Prompts you to authenticate. The account you select will be used when connecting to AzDO and Dataverse environments during setup. 
 2) Ensures the required Power Platform AzDO Extension is installed in the target AzDO.
    If you have the required level of access it will be enabled automatically.
+   Pipeline execution still uses the pinned `pacCliVersion` installed by `installdependencies.ps1` (the templates keep PPBT `AddToolsToPath` disabled).
 3) Prompts whether to use the ALM4Dataverse extension task for connection-variable resolution.
    - If enabled, setup can use either client secret or workload identity federation authentication.
    - If disabled, setup configures pipelines to use the Power Platform Build Tools **Set Connection Variables** task with service-principal secret auth.

@@ -1,0 +1,75 @@
+name: DEPLOY-main
+
+# Stage-per-environment deployment workflow.
+#
+# Keep this simple:
+#   1. Add one deploy-* job per environment.
+#   2. For each higher stage set `needs` to the previous stage.
+#   3. Set `promotion-mode` on each stage (or keep the default):
+#      - manual-gate-tag      (GitHub Free compatible)
+#      - environment-approval (auto-chain with environment approvals)
+#
+# See docs/setup/github-setup.md
+
+permissions:
+  actions: read
+  contents: write
+  id-token: write
+
+on:
+  workflow_run:
+    workflows: ['BUILD']
+    types: [completed]
+    branches: [main]
+  workflow_dispatch:
+    inputs:
+      build-run-id:
+        description: 'BUILD workflow run ID to deploy (find in Actions tab)'
+        required: true
+        type: string
+      target-environment:
+        description: 'Target environment to deploy to'
+        required: true
+        type: choice
+        options:
+          - TEST-main
+          - PROD
+          # Add further environments here (UAT, STAGING, etc.) as needed.
+          # Each option should have a matching deploy-* job below.
+
+jobs:
+  deploy-test:
+    # First stage in the chain.
+    uses: ALM4Dataverse/ALM4Dataverse/.github/workflows/deploy.yml@stable
+    permissions:
+      actions: read
+      contents: write
+      id-token: write
+    with:
+      environment-name: TEST-main
+      previous-environment-name: ''
+      promotion-mode: manual-gate-tag
+      github-context-json: ${{ toJSON(github) }}
+      caller-inputs-json: ${{ toJSON(inputs) }}
+      timeout-minutes: 360
+    secrets: inherit
+
+  deploy-prod:
+    # Higher stage example.
+    # Keep `if: always()` so manual promotion can still run even when prior jobs
+    # are skipped by stage-selection logic in the reusable workflow.
+    needs: deploy-test
+    if: ${{ always() }}
+    uses: ALM4Dataverse/ALM4Dataverse/.github/workflows/deploy.yml@stable
+    permissions:
+      actions: read
+      contents: write
+      id-token: write
+    with:
+      environment-name: PROD
+      previous-environment-name: TEST-main
+      promotion-mode: manual-gate-tag
+      github-context-json: ${{ toJSON(github) }}
+      caller-inputs-json: ${{ toJSON(inputs) }}
+      timeout-minutes: 360
+    secrets: inherit

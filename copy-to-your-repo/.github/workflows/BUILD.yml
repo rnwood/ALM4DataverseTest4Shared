@@ -1,0 +1,28 @@
+name: BUILD
+
+# Triggers on every push to any branch.
+# Also supports manual runs and automatic runs after EXPORT completes.
+# Packs Dataverse solutions into deployable artifacts and tags the source commit.
+#
+# See docs/usage/building-releases.md and docs/setup/github-setup.md
+
+on:
+  push:
+    branches:
+      - '**'
+  workflow_dispatch:
+  workflow_run:
+    workflows:
+      - EXPORT
+    types:
+      - completed
+
+jobs:
+  build:
+    if: ${{ github.event_name != 'workflow_run' || github.event.workflow_run.conclusion == 'success' }}
+    uses: ALM4Dataverse/ALM4Dataverse/.github/workflows/build.yml@stable
+    with:
+      timeout-minutes: 360
+    permissions:
+      contents: write
+      actions: write

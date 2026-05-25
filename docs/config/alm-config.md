@@ -120,6 +120,27 @@ scriptDependencies = @{
 When build assets are generated, the version that has been selected is frozen and baked into the configuration file that will be used when deploying.
 This ensures that the same exact version of all dependencies is always used for each release, even across extended time period and environments.
 
+### PAC CLI Version
+
+The pipeline scripts require Power Apps CLI (`pac`) for solution operations (for example export/unpack). `installdependencies.ps1` installs PAC automatically using the configured version.
+
+```powershell
+pacCliVersion = '2.7.4'
+```
+
+**Version Specifications:**
+- Empty string (`''`): Installs the latest stable version
+- `'prerelease'`: Installs the latest prerelease version
+- Specific version (for example `'2.7.4'`): Installs that exact version
+
+For reproducible builds/deployments, pin an explicit version.
+
+> **Azure DevOps note**
+>
+> Azure DevOps templates intentionally set `PowerPlatformToolInstaller@2` with `AddToolsToPath: false`.
+> This prevents the Power Platform Build Tools `pac` from being added to `PATH` and ensures
+> the pinned `pacCliVersion` installed by `installdependencies.ps1` is the one used.
+
 ### Import Timeout
 
 The `importTimeoutSeconds` setting controls how long each individual solution import operation is allowed to run before the deployment script cancels it. The default is 10800 seconds (3 hours).
@@ -130,9 +151,12 @@ importTimeoutSeconds = 10800
 
 Increase this value if solution imports time out in large or complex environments.
 
-> **Important — Azure DevOps pipeline job timeout**
+> **Important — pipeline job timeout (Azure DevOps and GitHub Actions)**
 >
-> `importTimeoutSeconds` only controls the timeout inside the deployment script. Azure DevOps also enforces its own **job-level timeout** (`timeoutInMinutes`) which will kill the entire job if it is reached, regardless of `importTimeoutSeconds`.
+> `importTimeoutSeconds` only controls the timeout inside the deployment script. The pipeline runner also enforces a **job-level timeout** which can terminate the job even when `importTimeoutSeconds` is higher.
+>
+> - **Azure DevOps** uses `timeoutInMinutes`.
+> - **GitHub Actions** uses `timeout-minutes`.
 >
 > All pipeline templates (`DEPLOY`, `IMPORT`, `BUILD`, `EXPORT`) set `timeoutInMinutes: 360`. Azure DevOps enforces your account's capacity limits on top of this value — on free capacity the effective limit is lower, but setting a higher value causes no harm; the job simply falls back to the account's enforced limit:
 >
@@ -143,6 +167,8 @@ Increase this value if solution imports time out in large or complex environment
 > | **Paid parallel jobs (Microsoft-hosted)** | Up to 360 minutes (6 hours) |
 > | **Self-hosted agents** | No enforced maximum |
 >
+> GitHub reusable workflows (`build.yml`, `export.yml`, `import.yml`, `deploy.yml`) also default to `timeout-minutes: 360`, and the copied caller workflows pass this value explicitly.
+>
 > The `DEPLOY` template exposes `timeoutInMinutes` as a parameter so you can override the default per-environment:
 >
 > ```yaml
@@ -151,6 +177,8 @@ Increase this value if solution imports time out in large or complex environment
 >     environmentName: Test-main
 >     timeoutInMinutes: 120  # override the 360-minute default for this environment
 > ```
+>
+> For GitHub, override per job by setting `with.timeout-minutes` in your caller workflow (for example in `DEPLOY-main.yml`).
 >
 > For imports that genuinely need more than 6 hours, switch to a **self-hosted agent** — there is no enforced maximum on self-hosted agents.
 

@@ -1,0 +1,21 @@
+name: IMPORT
+
+# Manually triggered: builds the current source and deploys it as unmanaged
+# solutions into your development Dataverse environment.
+#
+# See docs/usage/importing-changes.md and docs/setup/github-setup.md
+
+on:
+  workflow_dispatch:
+
+jobs:
+  import:
+    uses: ALM4Dataverse/ALM4Dataverse/.github/workflows/import.yml@stable
+    with:
+      timeout-minutes: 360
+    permissions:
+      id-token: write
+    # Credentials are resolved automatically by the reusable workflow from either:
+    # 1) GitHub environment Dev-{branch} (default), or
+    # 2) repo-level prefixed secrets/variables (e.g. DEV_MAIN_* or PREFIX_*).
+    secrets: inherit

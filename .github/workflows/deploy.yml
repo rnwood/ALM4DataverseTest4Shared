@@ -1,0 +1,513 @@
+name: Deploy to Environment
+
+# Reusable workflow: download build artifacts and deploy them to a single
+# Dataverse environment.
+#
+# Call this from your repo's DEPLOY-main.yml (once per environment):
+#   uses: ALM4Dataverse/ALM4Dataverse/.github/workflows/deploy.yml@stable
+#
+# CREDENTIALS — three supported approaches (see docs/config/github-secrets.md):
+#
+#   1. Workload Identity Federation / OIDC (recommended — no secrets to manage):
+#      Configure a federated credential on your App Registration trusting
+#      https://token.actions.githubusercontent.com with a subject matching how
+#      the workflow runs:
+#
+#      a) GitHub environment (Approach 1 or 2 — works on all plans):
+#         repo:{owner}/{repo}:environment:{environment-name}
+#         Store AZURE_CLIENT_ID, AZURE_TENANT_ID and DATAVERSE_URL in the GitHub
+#         environment.  Do NOT set AZURE_CLIENT_SECRET.
+#
+#      b) Prefixed repo-level credentials (Approach 3):
+#         repo:{owner}/{repo}:environment:{environment-name}
+#         Store repo-level prefixed secrets/variables (for example TEST_MAIN_* or
+#         PREFIX_*). They are mapped automatically by this workflow. Do NOT set
+#         AZURE_CLIENT_SECRET when using WIF.
+#
+#      GitHub environment protection rules (required reviewers, wait timers, etc.)
+#      require GitHub Pro, Team, or Enterprise for private repositories.
+#      GitHub environments themselves (for credential storage) work on all plans.
+#
+#   2. GitHub Environments with client secret (Teams/Enterprise for approval gates):
+#      Store AZURE_CLIENT_ID, AZURE_TENANT_ID, AZURE_CLIENT_SECRET, DATAVERSE_URL
+#      and DATAVERSESERVICEACCOUNTUPN as secrets/variables in a GitHub environment
+#      whose name matches environment-name (e.g. "TEST-main").
+#      Individual DataverseConnRef_* and DataverseEnvVar_* variables can be stored
+#      in the environment and are picked up automatically by the deploy script.
+#
+#   3. Prefixed global secrets (works on all licence levels including Free):
+#      Store credentials at repo level with per-environment prefixes and pass them
+#      by inheritance (`secrets: inherit`). This workflow maps them automatically
+#      to unprefixed names. Connection references and environment variables can be
+#      supplied as JSON objects or via prefixed variables.
+#      NOTE: No approval/gate mechanism is available without environment protection
+#      rules (see docs/setup/github-setup.md for details).
+#
+# DEPLOYMENT GATES (GitHub Free compatible):
+#   Gate tags are computed automatically by this workflow from:
+#   - environment-name
+#   - previous-environment-name
+#   - resolved build run id
+#   See docs/setup/github-setup.md.
+
+on:
+  workflow_call:
+    inputs:
+      environment-name:
+        required: true
+        type: string
+        description: >
+          Name of the deployment environment (e.g. "TEST-main", "UAT-main", "PROD").
+          Must match the name of the GitHub environment when using the GitHub
+          Environments approach.
+      previous-environment-name:
+        required: false
+        type: string
+        default: ''
+        description: >
+          Previous stage environment in the promotion chain.
+          Leave empty for the first stage.
+          In manual-gate-tag mode this is used to compute the required gate tag
+          automatically: deployed/{previous-environment-name}/{build-run-id}.
+      promotion-mode:
+        required: false
+        type: string
+        default: manual-gate-tag
+        description: >
+          Promotion strategy.
+          - manual-gate-tag: only first stage auto-runs; higher stages are manual
+            and must prove previous stage success using computed gate tags.
+          - environment-approval: stages can auto-chain via caller `needs` and
+            GitHub environment protection rules.
+      github-context-json:
+        required: true
+        type: string
+        description: >
+          toJSON(github) from the caller workflow.
+          Used to resolve trigger type and workflow_run details.
+      caller-inputs-json:
+        required: true
+        type: string
+        description: >
+          toJSON(inputs) from the caller workflow.
+          Used to resolve workflow_dispatch inputs such as build-run-id and
+          target-environment.
+      timeout-minutes:
+        required: false
+        type: number
+        default: 360
+        description: 'Job timeout in minutes (matches Azure DevOps default)'
+
+jobs:
+  deploy:
+    if: >-
+      (
+        fromJSON(inputs.github-context-json).event_name == 'workflow_run' &&
+        fromJSON(inputs.github-context-json).event.workflow_run.conclusion == 'success' &&
+        (
+          inputs.previous-environment-name == '' ||
+          inputs.promotion-mode == 'environment-approval'
+        )
+      ) || (
+        fromJSON(inputs.github-context-json).event_name == 'workflow_dispatch' &&
+        fromJSON(inputs.caller-inputs-json)['target-environment'] == inputs.environment-name
+      )
+    runs-on: windows-latest
+    timeout-minutes: ${{ inputs.timeout-minutes }}
+    environment: ${{ inputs.environment-name }}
+    permissions:
+      actions: read    # required to download artifacts from another workflow run
+      contents: write  # required to push success gate tag after deployment
+      id-token: write  # request OIDC token for Workload Identity Federation
+    env:
+      AZURE_CLIENT_ID:     ${{ vars.AZURE_CLIENT_ID }}
+      AZURE_TENANT_ID:     ${{ vars.AZURE_TENANT_ID }}
+      AZURE_CLIENT_SECRET: ${{ secrets.AZURE_CLIENT_SECRET }}
+      DATAVERSE_URL:       ${{ vars.DATAVERSE_URL }}
+      DATAVERSESERVICEACCOUNTUPN: >-
+        ${{ vars.DATAVERSESERVICEACCOUNTUPN
+            || secrets.DATAVERSESERVICEACCOUNTUPN }}
+      DATAVERSE_CONNECTION_REFS: ${{ vars.DATAVERSE_CONNECTION_REFS || vars.DATAVERSE_CONN_REFS }}
+      DATAVERSE_ENV_VARS:        ${{ vars.DATAVERSE_ENV_VARS }}
+
+    steps:
+      - name: Resolve deployment execution context
+        id: resolve
+        shell: pwsh
+        env:
+          INPUT_ENVIRONMENT_NAME: ${{ inputs.environment-name }}
+          INPUT_PREVIOUS_ENVIRONMENT_NAME: ${{ inputs.previous-environment-name }}
+          INPUT_PROMOTION_MODE: ${{ inputs.promotion-mode }}
+          INPUT_GITHUB_CONTEXT_JSON: ${{ inputs.github-context-json }}
+          INPUT_CALLER_INPUTS_JSON: ${{ inputs.caller-inputs-json }}
+        run: |
+          $environmentName = $env:INPUT_ENVIRONMENT_NAME.Trim()
+          $previousName    = $env:INPUT_PREVIOUS_ENVIRONMENT_NAME.Trim()
+          $promotionMode   = $env:INPUT_PROMOTION_MODE.Trim()
+
+          try {
+            $githubContext = $env:INPUT_GITHUB_CONTEXT_JSON | ConvertFrom-Json -Depth 100
+          } catch {
+            throw "github-context-json is not valid JSON."
+          }
+
+          try {
+            $callerInputs = $env:INPUT_CALLER_INPUTS_JSON | ConvertFrom-Json -Depth 50
+          } catch {
+            throw "caller-inputs-json is not valid JSON."
+          }
+
+          $eventName     = [string]$githubContext.event_name
+          $conclusion    = [string]$githubContext.event.workflow_run.conclusion
+          $workflowRunId = [string]$githubContext.event.workflow_run.id
+          $manualRunId   = [string]$callerInputs.'build-run-id'
+          $targetEnv     = [string]$callerInputs.'target-environment'
+
+          if ($promotionMode -notin @('manual-gate-tag', 'environment-approval')) {
+            throw "Unsupported promotion-mode '$promotionMode'. Use 'manual-gate-tag' or 'environment-approval'."
+          }
+
+          switch ($eventName) {
+            'workflow_run' {
+              $buildRunId = $workflowRunId
+            }
+            'workflow_dispatch' {
+              $buildRunId = $manualRunId
+            }
+            default {
+              throw "Unsupported trigger-event-name '$eventName'."
+            }
+          }
+
+          if ($eventName -eq 'workflow_dispatch' -and [string]::IsNullOrWhiteSpace($targetEnv)) {
+            throw "workflow_dispatch requires caller inputs to include 'target-environment'."
+          }
+
+          if ([string]::IsNullOrWhiteSpace($buildRunId)) {
+            throw "Resolved BUILD run ID is empty for event '$eventName'."
+          }
+
+          $requiredGateTag = ''
+          if ($promotionMode -eq 'manual-gate-tag' -and -not [string]::IsNullOrWhiteSpace($previousName)) {
+            $requiredGateTag = "deployed/$previousName/$buildRunId"
+          }
+
+          $successGateTag = "deployed/$environmentName/$buildRunId"
+
+          "build_run_id=$buildRunId"           | Out-File -FilePath $env:GITHUB_OUTPUT -Append
+          "required_gate_tag=$requiredGateTag" | Out-File -FilePath $env:GITHUB_OUTPUT -Append
+          "success_gate_tag=$successGateTag"   | Out-File -FilePath $env:GITHUB_OUTPUT -Append
+          "event_name=$eventName"              | Out-File -FilePath $env:GITHUB_OUTPUT -Append
+          "target_environment=$targetEnv"      | Out-File -FilePath $env:GITHUB_OUTPUT -Append
+
+          Write-Host "Resolved build run id: $buildRunId"
+          Write-Host "Resolved required gate tag: $requiredGateTag"
+          Write-Host "Resolved success gate tag: $successGateTag"
+
+      - name: Check deployment gate tag
+        if: steps.resolve.outputs.required_gate_tag != ''
+        shell: pwsh
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+        run: |
+          # Verify the previous environment's success-gate-tag exists before proceeding.
+          # This enforces ordered deployment promotion without environment protection rules.
+          $gateTag    = '${{ steps.resolve.outputs.required_gate_tag }}'
+          $encodedTag = [Uri]::EscapeDataString($gateTag)
+          $apiBase    = "https://api.github.com/repos/$($env:GITHUB_REPOSITORY)"
+          $headers    = @{
+            Authorization = "Bearer $($env:GITHUB_TOKEN)"
+            Accept        = "application/vnd.github+json"
+            "X-GitHub-Api-Version" = "2022-11-28"
+          }
+          Write-Host "Checking for required gate tag: $gateTag"
+          try {
+            Invoke-RestMethod -Uri "$apiBase/git/ref/tags/$encodedTag" -Headers $headers | Out-Null
+            Write-Host "✅ Gate tag '$gateTag' found — proceeding with deployment."
+          } catch {
+            $status = $_.Exception.Response.StatusCode.value__
+            if ($status -eq 404) {
+              Write-Error (
+                "Deployment gate check FAILED: the tag '$gateTag' does not exist.`n" +
+                "This means the prerequisite environment has not been successfully deployed for this build.`n" +
+                "Deploy to the previous environment first, then re-trigger this workflow.")
+            } else {
+              Write-Error "Unexpected error checking gate tag '$gateTag': $_"
+            }
+            exit 1
+          }
+
+      - name: Download build artifacts
+        uses: actions/download-artifact@v4.1.3
+        with:
+          name: artifacts
+          run-id: ${{ steps.resolve.outputs.build_run_id }}
+          github-token: ${{ github.token }}
+          repository: ${{ github.repository }}
+          path: artifacts
+
+      - name: Resolve dependency cache keys
+        id: dependency-cache
+        shell: pwsh
+        working-directory: artifacts
+        run: |
+          & "./alm/pipelines/scripts/resolvedependencycache.ps1" `
+            -BaseDirectory "." `
+            -AlmScriptsRoot "./alm/pipelines/scripts"
+
+      - name: Cache PowerShell modules
+        if: steps.dependency-cache.outputs.module_cache_enabled == 'true'
+        uses: actions/cache@v4
+        with:
+          key: ${{ steps.dependency-cache.outputs.module_cache_key }}
+          path: |
+            ~\Documents\PowerShell\Modules
+            ~\Documents\WindowsPowerShell\Modules
+
+      - name: Cache PAC CLI
+        if: steps.dependency-cache.outputs.pac_cache_enabled == 'true'
+        uses: actions/cache@v4
+        with:
+          key: ${{ steps.dependency-cache.outputs.pac_cache_key }}
+          path: ~\.alm4dataverse\tools
+
+      - name: Resolve prefixed repo variables and secrets
+        shell: pwsh
+        env:
+          ALL_REPO_VARS_JSON: ${{ toJSON(vars) }}
+          ALL_REPO_SECRETS_JSON: ${{ toJSON(secrets) }}
+          RESOLVED_ENVIRONMENT_NAME: ${{ inputs.environment-name }}
+        run: |
+          function ConvertTo-HashtableSafe([string]$jsonText) {
+            if ([string]::IsNullOrWhiteSpace($jsonText)) {
+              return @{}
+            }
+
+            try {
+              $result = $jsonText | ConvertFrom-Json -AsHashtable
+              if ($null -eq $result) {
+                return @{}
+              }
+
+              return $result
+            } catch {
+              Write-Warning "Could not parse JSON context for prefixed mapping. Continuing without it."
+              return @{}
+            }
+          }
+
+          function Write-GitHubEnv([string]$name, [string]$value) {
+            $delimiter = "EOF_$([Guid]::NewGuid().ToString('N'))"
+            Add-Content -Path $env:GITHUB_ENV -Value "$name<<$delimiter"
+            Add-Content -Path $env:GITHUB_ENV -Value $value
+            Add-Content -Path $env:GITHUB_ENV -Value $delimiter
+          }
+
+          function Get-PrefixFromEnvironment([string]$environmentName) {
+            if ([string]::IsNullOrWhiteSpace($environmentName)) {
+              return ''
+            }
+
+            $normalized = ($environmentName.Trim().ToUpperInvariant() -replace '[^A-Z0-9]+', '_').Trim('_')
+            if ([string]::IsNullOrWhiteSpace($normalized)) {
+              return ''
+            }
+
+            return "$normalized`_"
+          }
+
+          $aliasTargets = @{
+            'DATAVERSE_SERVICE_ACCOUNT_UPN' = 'DATAVERSESERVICEACCOUNTUPN'
+            'DATAVERSE_CONN_REFS'           = 'DATAVERSE_CONNECTION_REFS'
+          }
+
+          $derivedPrefix   = Get-PrefixFromEnvironment $env:RESOLVED_ENVIRONMENT_NAME
+          $prefixCandidates = @('PREFIX_')
+          if (-not [string]::IsNullOrWhiteSpace($derivedPrefix) -and $derivedPrefix -ne 'PREFIX_') {
+            $prefixCandidates = @($derivedPrefix) + $prefixCandidates
+          }
+
+          $sources = @(
+            @{ Name = 'secrets';   Data = ConvertTo-HashtableSafe $env:ALL_REPO_SECRETS_JSON; IsSensitive = $true  },
+            @{ Name = 'variables'; Data = ConvertTo-HashtableSafe $env:ALL_REPO_VARS_JSON;    IsSensitive = $false }
+          )
+
+          $setCount = 0
+          foreach ($source in $sources) {
+            foreach ($entry in $source.Data.GetEnumerator()) {
+              $fullName = [string]$entry.Key
+
+              $matchedPrefix = $null
+              foreach ($candidate in $prefixCandidates) {
+                if ($fullName.StartsWith($candidate, [System.StringComparison]::OrdinalIgnoreCase)) {
+                  $matchedPrefix = $candidate
+                  break
+                }
+              }
+
+              if ($null -eq $matchedPrefix) {
+                continue
+              }
+
+              $targetName = $fullName.Substring($matchedPrefix.Length)
+              if ([string]::IsNullOrWhiteSpace($targetName)) {
+                continue
+              }
+
+              $targetNames = @($targetName)
+              if ($aliasTargets.ContainsKey($targetName)) {
+                $targetNames += $aliasTargets[$targetName]
+              }
+
+              $rawValue = $entry.Value
+              if ($null -eq $rawValue) {
+                continue
+              }
+
+              $valueText = if ($rawValue -is [string]) {
+                [string]$rawValue
+              } else {
+                $rawValue | ConvertTo-Json -Compress -Depth 50
+              }
+
+              if ([string]::IsNullOrWhiteSpace($valueText)) {
+                continue
+              }
+
+              foreach ($name in ($targetNames | Select-Object -Unique)) {
+                if (-not [string]::IsNullOrWhiteSpace([System.Environment]::GetEnvironmentVariable($name))) {
+                  continue
+                }
+
+                [System.Environment]::SetEnvironmentVariable($name, $valueText)
+                Write-GitHubEnv -name $name -value $valueText
+                if ($source.IsSensitive) {
+                  Write-Output "::add-mask::$valueText"
+                }
+
+                $setCount++
+                Write-Host "Mapped prefixed $($source.Name) '$fullName' -> '$name'"
+              }
+            }
+          }
+
+          Write-Host "Prefixed mapping complete. Variables set: $setCount"
+
+      - name: Validate authentication inputs
+        shell: pwsh
+        run: |
+          if ([string]::IsNullOrWhiteSpace($env:AZURE_CLIENT_ID)) {
+            throw "AZURE_CLIENT_ID is required. Set GitHub environment variable AZURE_CLIENT_ID or provide a prefixed repo-level secret/variable."
+          }
+
+          if ([string]::IsNullOrWhiteSpace($env:AZURE_TENANT_ID)) {
+            throw "AZURE_TENANT_ID is required. Set GitHub environment variable AZURE_TENANT_ID or provide a prefixed repo-level secret/variable."
+          }
+
+          $tenant = $env:AZURE_TENANT_ID.Trim()
+          $isGuid = $tenant -match '^[0-9a-fA-F]{8}-([0-9a-fA-F]{4}-){3}[0-9a-fA-F]{12}$'
+          $isDns  = $tenant -match '^[A-Za-z0-9][A-Za-z0-9.-]*\.[A-Za-z]{2,}$'
+          if (-not ($isGuid -or $isDns)) {
+            throw "AZURE_TENANT_ID value '$tenant' is invalid. Use a tenant GUID or tenant domain (for example, contoso.onmicrosoft.com)."
+          }
+
+          if ([string]::IsNullOrWhiteSpace($env:DATAVERSE_URL)) {
+            throw "DATAVERSE_URL is required. Set GitHub environment variable DATAVERSE_URL or provide a prefixed repo-level variable."
+          }
+
+          if ([string]::IsNullOrWhiteSpace($env:DATAVERSESERVICEACCOUNTUPN)) {
+            throw "DATAVERSESERVICEACCOUNTUPN is required. Set GitHub environment variable DATAVERSESERVICEACCOUNTUPN or provide a prefixed repo-level secret/variable."
+          }
+
+      - name: Set up Workload Identity Federation (if no client secret)
+        shell: pwsh
+        run: |
+          # When AZURE_CLIENT_SECRET is absent, obtain an OIDC token from GitHub
+          # and write it to a temp file so that DefaultAzureCredential can use
+          # WorkloadIdentityCredential automatically.
+          if ([string]::IsNullOrEmpty($env:AZURE_CLIENT_SECRET)) {
+            Write-Host "No client secret provided — using Workload Identity Federation (OIDC)"
+            if ([string]::IsNullOrEmpty($env:ACTIONS_ID_TOKEN_REQUEST_URL)) {
+              throw ("AZURE_CLIENT_SECRET is not set and OIDC token request URL is not available. " +
+                     "Ensure the workflow job has 'id-token: write' permission.")
+            }
+            $tokenUrl = "$($env:ACTIONS_ID_TOKEN_REQUEST_URL)&audience=api://AzureADTokenExchange"
+            $headers  = @{
+              Authorization = "Bearer $($env:ACTIONS_ID_TOKEN_REQUEST_TOKEN)"
+              Accept        = "application/json"
+            }
+            $oidcToken = (Invoke-RestMethod -Uri $tokenUrl -Headers $headers).value
+            $tokenFile = Join-Path $env:RUNNER_TEMP "azure_oidc_token.txt"
+            [System.IO.File]::WriteAllText($tokenFile, $oidcToken)
+            "AZURE_FEDERATED_TOKEN_FILE=$tokenFile" | Out-File -FilePath $env:GITHUB_ENV -Append
+            Write-Host "OIDC token written to $tokenFile"
+          } else {
+            Write-Host "Client secret provided — using client secret authentication"
+          }
+
+      - name: Install Dependencies, Connect and Deploy
+        shell: pwsh
+        working-directory: artifacts
+        run: |
+          # Apply connection references from JSON environment variable.
+          # When using GitHub Environments, individual DataverseConnRef_* variables
+          # configured in the environment are already present as OS environment
+          # variables and will be picked up directly by deploy.ps1.
+          if (-not [string]::IsNullOrEmpty($env:DATAVERSE_CONNECTION_REFS)) {
+            $connRefs = $env:DATAVERSE_CONNECTION_REFS | ConvertFrom-Json
+            foreach ($prop in $connRefs.PSObject.Properties) {
+              [System.Environment]::SetEnvironmentVariable("DataverseConnRef_$($prop.Name)", $prop.Value)
+            }
+          }
+
+          # Apply Dataverse environment variable values from JSON environment variable.
+          if (-not [string]::IsNullOrEmpty($env:DATAVERSE_ENV_VARS)) {
+            $envVars = $env:DATAVERSE_ENV_VARS | ConvertFrom-Json
+            foreach ($prop in $envVars.PSObject.Properties) {
+              [System.Environment]::SetEnvironmentVariable("DataverseEnvVar_$($prop.Name)", $prop.Value)
+            }
+          }
+
+          & "./alm/pipelines/scripts/installdependencies.ps1"
+          & "./alm/pipelines/scripts/connect.ps1" -Url $env:DATAVERSE_URL
+          & "./alm/pipelines/scripts/deploy.ps1" -ArtifactsPath "."
+
+      - name: Push success gate tag
+        if: steps.resolve.outputs.success_gate_tag != ''
+        shell: pwsh
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+        run: |
+          # Record a permanent, auditable marker that this environment was successfully
+          # deployed for this build.  The next environment's workflow checks for this
+          # tag via required-gate-tag before it is allowed to proceed.
+          $successTag = '${{ steps.resolve.outputs.success_gate_tag }}'
+          $buildRunId = '${{ steps.resolve.outputs.build_run_id }}'
+          $apiBase    = "https://api.github.com/repos/$($env:GITHUB_REPOSITORY)"
+          $headers    = @{
+            Authorization = "Bearer $($env:GITHUB_TOKEN)"
+            Accept        = "application/vnd.github+json"
+            "X-GitHub-Api-Version" = "2022-11-28"
+          }
+
+          # Resolve the HEAD commit SHA of the originating BUILD run.
+          Write-Host "Resolving HEAD SHA for BUILD run $buildRunId..."
+          $run = Invoke-RestMethod -Uri "$apiBase/actions/runs/$buildRunId" -Headers $headers
+          $sha = $run.head_sha
+          Write-Host "HEAD SHA: $sha"
+
+          # Create the lightweight tag ref.
+          $body = @{ ref = "refs/tags/$successTag"; sha = $sha } | ConvertTo-Json
+          Write-Host "Pushing gate tag: $successTag"
+          try {
+            Invoke-RestMethod -Method POST -Uri "$apiBase/git/refs" -Headers $headers -Body $body | Out-Null
+            Write-Host "✅ Gate tag '$successTag' pushed successfully."
+          } catch {
+            $status = $_.Exception.Response.StatusCode.value__
+            if ($status -eq 422) {
+              Write-Host "ℹ️  Gate tag '$successTag' already exists (re-run?) — skipping."
+            } else {
+              Write-Error "Failed to push gate tag '$successTag': $_"
+              exit 1
+            }
+          }

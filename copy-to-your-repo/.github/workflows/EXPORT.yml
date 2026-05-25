@@ -1,0 +1,29 @@
+name: EXPORT
+
+# Manually triggered: exports Dataverse solutions from your development environment
+# and commits the unpacked changes back to this branch.
+#
+# See docs/usage/exporting-changes.md and docs/setup/github-setup.md
+
+on:
+  workflow_dispatch:
+    inputs:
+      commit-message:
+        description: 'Commit message for the exported changes'
+        required: true
+        type: string
+
+jobs:
+  export:
+    uses: ALM4Dataverse/ALM4Dataverse/.github/workflows/export.yml@stable
+    permissions:
+      contents: write
+      id-token: write
+    with:
+      commit-message: ${{ inputs.commit-message }}
+      timeout-minutes: 360
+
+    # Credentials are resolved automatically by the reusable workflow from either:
+    # 1) GitHub environment Dev-{branch} (default), or
+    # 2) repo-level prefixed secrets/variables (e.g. DEV_MAIN_* or PREFIX_*).
+    secrets: inherit

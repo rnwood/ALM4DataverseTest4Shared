@@ -5,7 +5,7 @@ This repo contains:
 implementation for Dataverse.
 - a set of process documentation and guidance on how to use and extend it.
 
-Currently to be used with Azure DevOps, but may be extended to GitHub in future (which is straightforward due to the way it is implemented).
+Supports both **Azure DevOps** and **GitHub Actions** (PREVIEW).
 
 Features:
 
@@ -18,35 +18,66 @@ Features:
 
 ## Getting Started
 
-1) [Run the automated setup process](docs/setup/automated-setup.md) to put in place the pipelines and other configuration needed.
+### GitHub Actions
 
-   Alternatively, if you prefer manual configuration, see the [Manual Setup Guide](docs/setup/manual-setup.md).
-    
+1) Run the automated setup script in Windows PowerShell:
+
+   ```powershell
+   iwr https://github.com/ALM4Dataverse/ALM4Dataverse/releases/latest/download/setup-github.ps1 | iex
+   ```
+
+    The setup script automatically detects whether GitHub environment approvals are
+    available for your repository and chooses the matching deployment strategy
+    (`environment-approval` or `manual-gate-tag` with prefixed repo-level credentials).
+
+   Or follow the [GitHub Actions Setup Guide](docs/setup/github-setup.md) to configure manually.
+
+### Azure DevOps
+
+1) Run the automated setup script in Windows PowerShell:
+
+   ```powershell
+   iwr https://github.com/ALM4Dataverse/ALM4Dataverse/releases/latest/download/setup-azdo.ps1 | iex
+   ```
+
+   Or follow the [Manual Setup Guide](docs/setup/azdo-manual-setup.md) if you prefer manual configuration.
+   See the [Automated Setup Guide](docs/setup/azdo-automated-setup.md) for details.
+
 
 ## Documentation
 
 ### Initial Setup
 
+#### GitHub Actions
+- [GitHub Actions Setup Guide](docs/setup/github-setup.md)
+- [GitHub Actions Automated Setup](docs/setup/github-automated-setup.md)
+
+#### Azure DevOps
 - [Azure DevOps Organization Requirements](docs/setup/azdo-organisation-requirements.md)
-- [Automated Setup](docs/setup/automated-setup.md)
-- [Manual Setup](docs/setup/manual-setup.md)
+- [Automated Setup](docs/setup/azdo-automated-setup.md)
+- [Manual Setup](docs/setup/azdo-manual-setup.md)
 
 #### Usage Instructions
 
-- [Exporting changes](docs/usage/exporting-changes.md) - `EXPORT` pipeline
+- [Exporting changes](docs/usage/exporting-changes.md) - `EXPORT` pipeline/workflow
   Capturing changes from your dev environments into source control.
-- [Building releases](docs/usage/building-releases.md) - `BUILD` pipeline
+- [Building releases](docs/usage/building-releases.md) - `BUILD` pipeline/workflow
   Generating release assets for later deployment.
-- [Deploying](docs/usage/deploying.md) -`DEPLOY-<branchname>` pipeline
+- [Deploying](docs/usage/deploying.md) -`DEPLOY-<branchname>` pipeline/workflow
   Deploying release assets to environments in a controlled sequence
-- [Importing changes](docs/usage/importing-changes.md) - `IMPORT` pipeline
+- [Importing changes](docs/usage/importing-changes.md) - `IMPORT` pipeline/workflow
   Seeding or updating dev environment from source control.
 
 ### Configuration Reference
 
 - [ALM Configuration](docs/config/alm-config.md) - `alm-config.psd1`
-- [Environment Variable Group](docs/config/environment-variable-group.md)
-- [Service Connection Configuration](docs/config/environment-service-connection.md)
+
+#### GitHub Actions
+- [GitHub Secrets & Variables](docs/config/github-secrets.md)
+
+#### Azure DevOps
+- [Environment Variable Group](docs/config/azdo-environment-variable-group.md)
+- [Service Connection Configuration](docs/config/azdo-environment-service-connection.md)
 
 #### Example 'Hook' Extensions
 

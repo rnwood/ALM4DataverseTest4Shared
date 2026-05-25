@@ -340,7 +340,7 @@ if ($rnwoodDataverseVersion -like '__*') {
         $config = Import-PowerShellDataFile -Path $configPath
         $rnwoodDataverseVersion = $config.scriptDependencies.'Rnwood.Dataverse.Data.PowerShell'
     } else {
-        throw "This script appears to be running in development mode but alm-config-defaults.psd1 was not found at $configPath. Please download the released version from https://github.com/rnwood/ALM4Dataverse/releases/latest/download/setup.ps1"
+        throw "This script appears to be running in development mode but alm-config-defaults.psd1 was not found at $configPath. Please download the released version from https://github.com/ALM4Dataverse/ALM4Dataverse/releases/latest/download/setup-azdo.ps1"
     }
 }
 
@@ -474,7 +474,10 @@ function Get-AuthToken {
     param(
         [Parameter(Mandatory)][string]$ResourceUrl,
         [Parameter()][string]$TenantId,
-        [Parameter()][string]$ClientId = '1950a258-227b-4e31-a9cf-717495945fc2' # Azure PowerShell Client ID
+        [Parameter()][string]$ClientId = '1950a258-227b-4e31-a9cf-717495945fc2', # Azure PowerShell Client ID
+        [Parameter()][switch]$ForceInteractive,
+        [Parameter()][string]$PreferredUsername,
+        [Parameter()][switch]$ListAccountsOnly
     )
 
     # Try to load the assembly using LoadWithPartialName as requested
@@ -554,13 +557,45 @@ function Get-AuthToken {
         Set-Variable -Name "MsalApp" -Value $app -Scope Script
     }
 
-    $accounts = $app.GetAccountsAsync().GetAwaiter().GetResult()
-    $account = $accounts | Select-Object -First 1
+    # Persist token cache between script runs so cached Azure logins can be reused.
+    $msalCacheDir = Join-Path ([Environment]::GetFolderPath('LocalApplicationData')) 'ALM4Dataverse'
+    New-DirectoryIfMissing -Path $msalCacheDir
+    $msalCachePath = Join-Path $msalCacheDir 'msal-token-cache.bin'
+
+    try {
+        if (Test-Path -LiteralPath $msalCachePath) {
+            $cacheBytes = [System.IO.File]::ReadAllBytes($msalCachePath)
+            if ($cacheBytes -and $cacheBytes.Length -gt 0) {
+                $app.UserTokenCache.DeserializeMsalV3($cacheBytes, $true)
+            }
+        }
+    }
+    catch {
+        Write-Warning "Failed to load MSAL token cache from '$msalCachePath': $($_.Exception.Message)"
+    }
+
+    $accounts = @($app.GetAccountsAsync().GetAwaiter().GetResult())
+
+    if ($ListAccountsOnly) {
+        return @($accounts | ForEach-Object { $_.Username } | Where-Object { -not [string]::IsNullOrWhiteSpace($_) } | Select-Object -Unique)
+    }
+
+    $account = $null
+    if (-not [string]::IsNullOrWhiteSpace($PreferredUsername)) {
+        $account = $accounts | Where-Object { $_.Username -ieq $PreferredUsername } | Select-Object -First 1
+        if (-not $account) {
+            Write-Host "Preferred cached Azure login '$PreferredUsername' was not found; using the default cached account selection." -ForegroundColor Yellow
+        }
+    }
+
+    if (-not $account) {
+        $account = $accounts | Select-Object -First 1
+    }
 
     $authResult = $null
 
     try {
-        if ($account) {
+        if (-not $ForceInteractive -and $account) {
             $authResult = $app.AcquireTokenSilent($scopes, $account).ExecuteAsync().GetAwaiter().GetResult()
         }
     }
@@ -570,12 +605,32 @@ function Get-AuthToken {
 
     if (-not $authResult) {
         try {
-            $authResult = $app.AcquireTokenInteractive($scopes).ExecuteAsync().GetAwaiter().GetResult()
+            $interactiveBuilder = $app.AcquireTokenInteractive($scopes)
+
+            if ($ForceInteractive) {
+                $interactiveBuilder = $interactiveBuilder.WithPrompt([Microsoft.Identity.Client.Prompt]::SelectAccount)
+            }
+
+            if (-not [string]::IsNullOrWhiteSpace($PreferredUsername)) {
+                $interactiveBuilder = $interactiveBuilder.WithLoginHint($PreferredUsername)
+            }
+
+            $authResult = $interactiveBuilder.ExecuteAsync().GetAwaiter().GetResult()
         }
         catch {
             Write-Error "Failed to acquire token interactively: $_"
             throw
         }
+    }
+
+    try {
+        $updatedCacheBytes = $app.UserTokenCache.SerializeMsalV3()
+        if ($updatedCacheBytes -and $updatedCacheBytes.Length -gt 0) {
+            [System.IO.File]::WriteAllBytes($msalCachePath, $updatedCacheBytes)
+        }
+    }
+    catch {
+        Write-Warning "Failed to save MSAL token cache to '$msalCachePath': $($_.Exception.Message)"
     }
 
     return $authResult
@@ -589,14 +644,39 @@ Write-Host "When prompted, please log in with an account that has access to:" -F
 Write-Host "- Your Azure DevOps organization/project (PROJECT administrator role for existing project, ORGANISATION OWNER role if you want to create a new project)" -ForegroundColor Green
 Write-Host "- Your Dataverse DEV environment (SYSTEM ADMINISTRATOR role)" -ForegroundColor Green
 Write-Host ""
-Read-Host "Press Enter to open browser for authentication..."
-
 
 # Azure DevOps resource for AAD token acquisition.
 $adoResourceUrl = '499b84ac-1321-427f-aa17-267ca6975798'
 
+$cachedAzureAccounts = @(Get-AuthToken -ResourceUrl $adoResourceUrl -TenantId $TenantId -ListAccountsOnly)
+$preferredAzureUsername = $null
+$forceAzureInteractive = $false
+
+if ($cachedAzureAccounts.Count -gt 0) {
+    $azureAuthMenuItems = @($cachedAzureAccounts | ForEach-Object { "Use existing Azure login: $_" })
+    $azureAuthMenuItems += "Sign in with a different Azure account"
+
+    $azureAuthChoice = Select-FromMenu -Title "Azure authentication" -Items $azureAuthMenuItems
+    if ($null -eq $azureAuthChoice) {
+        throw "No Azure authentication option selected."
+    }
+
+    if ($azureAuthChoice -lt $cachedAzureAccounts.Count) {
+        $preferredAzureUsername = $cachedAzureAccounts[$azureAuthChoice]
+        Write-Host "Using cached Azure login: $preferredAzureUsername" -ForegroundColor Green
+    }
+    else {
+        $forceAzureInteractive = $true
+        Read-Host "Press Enter to open browser for authentication..."
+    }
+}
+else {
+    Write-Host "No cached Azure login detected. Browser sign-in is required." -ForegroundColor Yellow
+    Read-Host "Press Enter to open browser for authentication..."
+}
+
 $authResult = Invoke-WithErrorHandling -OperationName "Authentication" -ScriptBlock {
-    $result = Get-AuthToken -ResourceUrl $adoResourceUrl -TenantId $TenantId
+    $result = Get-AuthToken -ResourceUrl $adoResourceUrl -TenantId $TenantId -PreferredUsername $preferredAzureUsername -ForceInteractive:$forceAzureInteractive
     
     if (-not $result -or -not $result.AccessToken) {
         throw "Failed to acquire an Azure DevOps access token."
@@ -2685,7 +2765,7 @@ function Ensure-AzDoVariableGroupExists {
         }
 
         # Use VSTeam command to create variable group
-        $created = Add-VSTeamVariableGroup -ProjectName $Project -Name $GroupName -Type 'Vsts' -Variables $variablesPayload -Description 'ALM4Dataverse environment variable group (created by setup.ps1)'
+        $created = Add-VSTeamVariableGroup -ProjectName $Project -Name $GroupName -Type 'Vsts' -Variables $variablesPayload -Description 'ALM4Dataverse environment variable group (created by setup-azdo.ps1)'
 
         if ($created -and $created.id) {
             Write-Host "Created variable group '$GroupName' (id: $($created.id))."
@@ -2759,6 +2839,15 @@ Write-Section "Ensuring main repository contains pipeline YAMLs"
 
 Write-Section "Ensuring environment variable group"
 
+$mainRepo = Select-AzDoMainRepository -ProjectName $selectedProject.Name -SharedRepositoryName $sharedRepoName
+
+$script:mainRepoBranch = 'main'
+if ($mainRepo.defaultBranch) {
+    $script:mainRepoBranch = ConvertFrom-GitRefToBranchName -Ref $mainRepo.defaultBranch
+}
+
+$script:devEnvironmentShortName = "Dev-$script:mainRepoBranch"
+
 # Create the environment variable group only if it doesn't exist.
 # This seeds example values that you can later replace with your real connection reference ids / environment variable values.
 Invoke-WithErrorHandling -OperationName "Creating Environment Variable Group" -ScriptBlock {
@@ -2766,14 +2855,12 @@ Invoke-WithErrorHandling -OperationName "Creating Environment Variable Group" -S
             -Organization $orgName `
             -Project $selectedProject.Name `
             -ProjectId $selectedProject.Id `
-            -GroupName 'Environment-Dev-main' `
+            -GroupName "Environment-$script:devEnvironmentShortName" `
             -Variables @{
             'CONNREF_example_uniquename' = 'connectionid'
             'ENVVAR_example_uniquename'  = 'value'
         })
 } | Out-Null
-
-$mainRepo = Select-AzDoMainRepository -ProjectName $selectedProject.Name -SharedRepositoryName $sharedRepoName
 
 Invoke-WithErrorHandling -OperationName "Syncing Pipeline Files to Main Repository" -ScriptBlock {
     # Determine copy-to-your-repo folder location
@@ -2814,11 +2901,6 @@ Invoke-WithErrorHandling -OperationName "Setting Up Build Service Permissions" -
 
 Invoke-WithErrorHandling -OperationName "Creating Pipeline Definitions" -ScriptBlock {
     # Create/ensure actual Azure DevOps pipelines that point at the YAML files we just synced.
-    $script:mainRepoBranch = 'main'
-    if ($mainRepo.defaultBranch) {
-        $script:mainRepoBranch = ConvertFrom-GitRefToBranchName -Ref $mainRepo.defaultBranch
-    }
-
     $script:yamlFiles = @(
         'pipelines/BUILD.yml',
         "pipelines/DEPLOY-$script:mainRepoBranch.yml",
@@ -3470,9 +3552,10 @@ function Get-DataverseEnvironmentsSelection {
                         continue
                     }
 
-                    Write-Host "Short environment names should often follow the pattern ENVIRONMENT-branch (e.g. TEST-main, UAT-main, PROD)" -ForegroundColor DarkGray
+                    Write-Host "Use a short deployment environment name (for example: TEST, UAT, PROD)." -ForegroundColor DarkGray
 
-                    $shortName = Read-Host "Enter a short name for this environment (e.g. TEST-main, UAT-main, PROD)"
+                    $shortName = Read-Host "Enter a short name for this environment (e.g. TEST, UAT, PROD)"
+                    $shortName = $shortName.Trim()
                     if ([string]::IsNullOrWhiteSpace($shortName)) {
                         Write-Host "Short name is required." -ForegroundColor Red
                         Start-Sleep -Seconds 2
@@ -3664,7 +3747,7 @@ if ($environments.Count -gt 0) {
     # Add Dev environment to the list of environments to configure service connection for
     $allEnvs = @()
     $allEnvs += [pscustomobject]@{
-        ShortName = "Dev-main"
+        ShortName = $script:devEnvironmentShortName
         Url = $devEnvUrl
     }
     $allEnvs += $environments
@@ -3765,7 +3848,7 @@ if ($environments.Count -gt 0) {
 
             # Authorize pipeline for Service Connection
             if ($endpoint -and $endpoint.id) {
-                if ($env.ShortName -eq "Dev-main") {
+                if ($env.ShortName -eq $script:devEnvironmentShortName) {
                     if ($exportPipeline) {
                         Ensure-AzDoPipelinePermission -Organization $orgName -Project $selectedProject.Name -ResourceType 'endpoint' -ResourceId $endpoint.id -PipelineId $exportPipeline.id
                     }
@@ -3780,7 +3863,7 @@ if ($environments.Count -gt 0) {
         Invoke-WithErrorHandling -OperationName "Configuring Environment Resources for '$($env.ShortName)'" -ScriptBlock {
            write-section "Configuring Environment Resources for '$($env.ShortName)'"
             # Ensure Environment resource exists and authorize pipeline
-            if ($env.ShortName -ne "Dev-main") {
+            if ($env.ShortName -ne $script:devEnvironmentShortName) {
                 $azDoEnv = Ensure-AzDoEnvironment -Organization $orgName -Project $selectedProject.Name -EnvironmentName $env.ShortName -Description "Deployment environment for $($env.ShortName)"
                 
                 if ($azDoEnv -and $deployPipeline) {
@@ -3801,7 +3884,7 @@ if ($environments.Count -gt 0) {
 
             $varGroup = $null
             # Variable group for Dev is already created earlier, but we ensure it exists for others
-            if ($env.ShortName -ne "Dev-main") {
+            if ($env.ShortName -ne $script:devEnvironmentShortName) {
                 $varGroup = Ensure-AzDoVariableGroupExists `
                     -Organization $orgName `
                     -Project $selectedProject.Name `
@@ -3814,9 +3897,9 @@ if ($environments.Count -gt 0) {
                 }
             } else {
                 # Fetch and update Dev variable group with service account UPN
-                $varGroup = Get-VSTeamVariableGroup -ProjectName $selectedProject.Name -Name "Environment-Dev-main" -ErrorAction SilentlyContinue
+                $varGroup = Get-VSTeamVariableGroup -ProjectName $selectedProject.Name -Name "Environment-$script:devEnvironmentShortName" -ErrorAction SilentlyContinue
                 if ($varGroup) {
-                    Update-AzDoVariableGroup -ProjectName $selectedProject.Name -GroupName "Environment-Dev-main" -Variables @{
+                    Update-AzDoVariableGroup -ProjectName $selectedProject.Name -GroupName "Environment-$script:devEnvironmentShortName" -Variables @{
                         'DataverseServiceAccountUPN' = $script:serviceAccountUPN
                     } | Out-Null
                 }
@@ -3824,7 +3907,7 @@ if ($environments.Count -gt 0) {
 
             # Authorize pipeline for Variable Group
             if ($varGroup -and $varGroup.id) {
-                 if ($env.ShortName -eq "Dev-main") {
+                 if ($env.ShortName -eq $script:devEnvironmentShortName) {
                     if ($exportPipeline) {
                         Ensure-AzDoPipelinePermission -Organization $orgName -Project $selectedProject.Name -ResourceType 'variablegroup' -ResourceId $varGroup.id -PipelineId $exportPipeline.id
                     }

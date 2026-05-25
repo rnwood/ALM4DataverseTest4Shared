@@ -22,16 +22,17 @@ jobs:
         id: get_tag
         run: echo "TAG_NAME=${GITHUB_REF#refs/tags/}" >> $GITHUB_OUTPUT
 
-      - name: Prepare setup.ps1 for release
+      - name: Prepare setup scripts for release
         id: prepare_setup
         run: |
           TAG_NAME="${{ steps.get_tag.outputs.TAG_NAME }}"
           UPSTREAM_REPO="https://github.com/${{ github.repository }}.git"
           
-          # Use the prepare-release.ps1 script
+          # Use the prepare-release.ps1 script (produces release/setup-azdo.ps1 and release/setup-github.ps1)
           pwsh -File prepare-release.ps1 -TagName "$TAG_NAME" -OutputDir release -UpstreamRepo "$UPSTREAM_REPO"
           
-          echo "SETUP_FILE=release/setup.ps1" >> $GITHUB_OUTPUT
+          echo "SETUP_AZDO_FILE=release/setup-azdo.ps1" >> $GITHUB_OUTPUT
+          echo "SETUP_GITHUB_FILE=release/setup-github.ps1" >> $GITHUB_OUTPUT
 
       - name: Update stable tag
         run: |
@@ -53,17 +54,26 @@ jobs:
           cat << EOF > release_notes.md
           ## Getting Started
           
-          ### Automated Setup (Recommended)
+          ### Azure DevOps — Automated Setup (Recommended)
           
-          Run this command in Windows PowerShell to set up ALM4Dataverse for this release:
+          Run this command in Windows PowerShell to set up ALM4Dataverse with Azure DevOps:
           
           \`\`\`powershell
-          iwr https://github.com/${{ github.repository }}/releases/download/${TAG_NAME}/setup.ps1 | iex
+          iwr https://github.com/${{ github.repository }}/releases/download/${TAG_NAME}/setup-azdo.ps1 | iex
+          \`\`\`
+          
+          ### GitHub Actions — Automated Setup
+          
+          Run this command in Windows PowerShell to set up ALM4Dataverse with GitHub Actions:
+          
+          \`\`\`powershell
+          iwr https://github.com/${{ github.repository }}/releases/download/${TAG_NAME}/setup-github.ps1 | iex
           \`\`\`
           
           📚 **Documentation:**
-          - [Automated Setup Guide](https://github.com/${{ github.repository }}/blob/${TAG_NAME}/docs/setup/automated-setup.md) - Quick and easy setup using the script
-          - [Manual Setup Guide](https://github.com/${{ github.repository }}/blob/${TAG_NAME}/docs/setup/manual-setup.md) - Step-by-step manual configuration
+          - [GitHub Actions Setup Guide](https://github.com/${{ github.repository }}/blob/${TAG_NAME}/docs/setup/github-setup.md) - GitHub Actions setup
+          - [Azure DevOps Automated Setup Guide](https://github.com/${{ github.repository }}/blob/${TAG_NAME}/docs/setup/azdo-automated-setup.md) - Azure DevOps quick setup
+          - [Azure DevOps Manual Setup Guide](https://github.com/${{ github.repository }}/blob/${TAG_NAME}/docs/setup/azdo-manual-setup.md) - Step-by-step manual configuration
           - [Getting Started](https://github.com/${{ github.repository }}/blob/${TAG_NAME}/README.md#getting-started) - Overview and documentation
           EOF
           
@@ -132,38 +142,50 @@ jobs:
               console.log('Created new release');
             }
             
-            // Upload setup.ps1 as release asset
-            const setupFilePath = '${{ steps.prepare_setup.outputs.SETUP_FILE }}';
-            const setupFileContent = fs.readFileSync(setupFilePath);
-            
-            // First, delete any existing setup.ps1 asset
+            // Upload setup scripts as release assets
+            const setupFiles = [
+              { path: '${{ steps.prepare_setup.outputs.SETUP_AZDO_FILE }}',   name: 'setup-azdo.ps1' },
+              { path: '${{ steps.prepare_setup.outputs.SETUP_GITHUB_FILE }}', name: 'setup-github.ps1' },
+            ];
+
+            // Fetch existing assets once
+            let existingAssets = [];
             try {
               const { data: assets } = await github.rest.repos.listReleaseAssets({
                 owner: context.repo.owner,
                 repo: context.repo.repo,
                 release_id: releaseId,
               });
-              
-              const existingAsset = assets.find(asset => asset.name === 'setup.ps1');
-              if (existingAsset) {
-                await github.rest.repos.deleteReleaseAsset({
-                  owner: context.repo.owner,
-                  repo: context.repo.repo,
-                  asset_id: existingAsset.id,
-                });
-                console.log('Deleted existing setup.ps1 asset');
-              }
+              existingAssets = assets;
             } catch (error) {
-              console.warn('Could not check for existing asset:', error.message);
+              console.warn('Could not list existing assets:', error.message);
             }
-            
-            // Upload new setup.ps1 asset
-            await github.rest.repos.uploadReleaseAsset({
-              owner: context.repo.owner,
-              repo: context.repo.repo,
-              release_id: releaseId,
-              name: 'setup.ps1',
-              data: setupFileContent,
-            });
-            
-            console.log('Uploaded setup.ps1 as release asset');
+
+            for (const { path: filePath, name: assetName } of setupFiles) {
+              // Delete any existing asset with the same name
+              const existingAsset = existingAssets.find(a => a.name === assetName);
+              if (existingAsset) {
+                try {
+                  await github.rest.repos.deleteReleaseAsset({
+                    owner: context.repo.owner,
+                    repo: context.repo.repo,
+                    asset_id: existingAsset.id,
+                  });
+                  console.log(`Deleted existing ${assetName} asset`);
+                } catch (error) {
+                  console.warn(`Could not delete existing ${assetName} asset:`, error.message);
+                }
+              }
+
+              // Upload new asset
+              const fileContent = fs.readFileSync(filePath);
+              await github.rest.repos.uploadReleaseAsset({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                release_id: releaseId,
+                name: assetName,
+                data: fileContent,
+              });
+              console.log(`Uploaded ${assetName} as release asset`);
+            }
+

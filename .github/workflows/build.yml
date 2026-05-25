@@ -1,0 +1,173 @@
+name: Build
+
+# Reusable workflow: build artifacts from source and tag the commit.
+#
+# Call this from your repo's BUILD.yml:
+#   uses: ALM4Dataverse/ALM4Dataverse/.github/workflows/build.yml@stable
+#
+# Outputs the GitHub Actions run ID so downstream DEPLOY workflows can
+# download the artifacts produced here.
+
+on:
+  workflow_call:
+    inputs:
+      timeout-minutes:
+        required: false
+        type: number
+        default: 360
+        description: 'Job timeout in minutes (matches Azure DevOps default)'
+    outputs:
+      run-id:
+        description: 'The GitHub Actions run ID for this build (pass to DEPLOY as build-run-id)'
+        value: ${{ jobs.build.outputs.run-id }}
+
+jobs:
+  build:
+    runs-on: windows-latest
+    timeout-minutes: ${{ inputs.timeout-minutes }}
+    permissions:
+      contents: write  # push git tag
+      actions: write   # upload artifacts
+    outputs:
+      run-id: ${{ github.run_id }}
+
+    steps:
+      - name: Checkout source code
+        uses: actions/checkout@v4
+        with:
+          path: self
+          fetch-depth: 1
+
+      - name: Resolve ALM checkout source
+        id: resolve-alm-source
+        shell: pwsh
+        env:
+          JOB_CONTEXT_JSON: ${{ toJson(job) }}
+        run: |
+          $jobContextJson = $env:JOB_CONTEXT_JSON
+
+          $resolvedRepo = ''
+          $resolvedRef = ''
+
+          try {
+            $jobContext = $jobContextJson | ConvertFrom-Json -AsHashtable
+            if ($jobContext.ContainsKey('workflow_repository')) {
+              $resolvedRepo = [string]$jobContext['workflow_repository']
+            }
+            if ($jobContext.ContainsKey('workflow_sha')) {
+              $resolvedRef = [string]$jobContext['workflow_sha']
+            }
+            if (([string]::IsNullOrWhiteSpace($resolvedRepo) -or [string]::IsNullOrWhiteSpace($resolvedRef)) -and $jobContext.ContainsKey('workflow_ref')) {
+              $workflowRef = [string]$jobContext['workflow_ref']
+              if ($workflowRef -match '^(?<repo>[^/]+/[^/]+)/\.github/workflows/[^@]+@(?<ref>.+)$') {
+                if ([string]::IsNullOrWhiteSpace($resolvedRepo)) {
+                  $resolvedRepo = $Matches['repo']
+                }
+                if ([string]::IsNullOrWhiteSpace($resolvedRef)) {
+                  $resolvedRef = $Matches['ref']
+                }
+              }
+            }
+          }
+          catch {
+            Write-Host "Warning: Failed to parse job context for workflow identity. Falling back to defaults."
+          }
+
+          if ([string]::IsNullOrWhiteSpace($resolvedRepo)) {
+            $resolvedRepo = 'ALM4Dataverse/ALM4Dataverse'
+          }
+          if ([string]::IsNullOrWhiteSpace($resolvedRef)) {
+            $resolvedRef = 'stable'
+          }
+
+          "repository=$resolvedRepo" | Out-File -FilePath $env:GITHUB_OUTPUT -Append -Encoding utf8
+          "ref=$resolvedRef" | Out-File -FilePath $env:GITHUB_OUTPUT -Append -Encoding utf8
+          Write-Host "Resolved ALM checkout source: $resolvedRepo@$resolvedRef"
+
+      - name: Checkout ALM4Dataverse
+        uses: actions/checkout@v4
+        with:
+          repository: ${{ steps.resolve-alm-source.outputs.repository }}
+          ref: ${{ steps.resolve-alm-source.outputs.ref }}
+          path: alm
+
+      - name: Resolve dependency cache keys
+        id: dependency-cache
+        shell: pwsh
+        working-directory: ${{ github.workspace }}/self
+        run: |
+          & "${{ github.workspace }}/alm/pipelines/scripts/resolvedependencycache.ps1" `
+            -BaseDirectory "${{ github.workspace }}/self" `
+            -AlmScriptsRoot "${{ github.workspace }}/alm/pipelines/scripts"
+
+      - name: Cache PowerShell modules
+        if: steps.dependency-cache.outputs.module_cache_enabled == 'true'
+        uses: actions/cache@v4
+        with:
+          key: ${{ steps.dependency-cache.outputs.module_cache_key }}
+          path: |
+            ~\Documents\PowerShell\Modules
+            ~\Documents\WindowsPowerShell\Modules
+
+      - name: Cache PAC CLI
+        if: steps.dependency-cache.outputs.pac_cache_enabled == 'true'
+        uses: actions/cache@v4
+        with:
+          key: ${{ steps.dependency-cache.outputs.pac_cache_key }}
+          path: ~\.alm4dataverse\tools
+
+      - name: Set build number
+        id: build-number
+        shell: pwsh
+        run: |
+          $date = Get-Date -format 'yyyy-MM-dd-HHmmss'
+          $repoName  = '${{ github.event.repository.name }}'
+          $branch    = '${{ github.ref_name }}' -replace '[^a-zA-Z0-9._/-]', '-'
+          $runNumber = '${{ github.run_number }}'
+          $buildNumber = "$repoName-$branch-$date-$runNumber"
+          echo "BUILD_NUMBER=$buildNumber" >> $env:GITHUB_ENV
+          Write-Host "Build number: $buildNumber"
+
+      - name: Install Dependencies and Build
+        shell: pwsh
+        working-directory: ${{ github.workspace }}/self
+        run: |
+          & "${{ github.workspace }}/alm/pipelines/scripts/installdependencies.ps1"
+          & "${{ github.workspace }}/alm/pipelines/scripts/build.ps1" `
+            -SourceDirectory "${{ github.workspace }}/self" `
+            -ArtifactStagingDirectory "${{ github.workspace }}/artifacts"
+
+      - name: Upload build artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: artifacts
+          path: ${{ github.workspace }}/artifacts/
+          retention-days: 90
+
+      - name: Tag source with build version
+        shell: pwsh
+        working-directory: ${{ github.workspace }}/self
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $rawBuildNumber = $env:BUILD_NUMBER
+          $sanitizedBuildNumber = $rawBuildNumber `
+            -replace '[^a-zA-Z0-9._/-]', '-' `
+            -replace '\.{2,}', '-' `
+            -replace '/{2,}', '/'
+          $sanitizedBuildNumber = $sanitizedBuildNumber.Trim('/', '.')
+          if ($sanitizedBuildNumber.EndsWith('.lock')) {
+            $sanitizedBuildNumber = $sanitizedBuildNumber -replace '\.lock$', '-lock'
+          }
+          if ([string]::IsNullOrWhiteSpace($sanitizedBuildNumber)) {
+            throw "Build number '$rawBuildNumber' cannot be converted to a valid git tag value"
+          }
+          $tagName = "v$sanitizedBuildNumber"
+          Write-Host "Tagging source repository with build version $tagName"
+          git config user.email "${{ github.actor }}@users.noreply.github.com"
+          if ($LASTEXITCODE -ne 0) { throw "git config user.email failed" }
+          git config user.name "${{ github.actor }}"
+          if ($LASTEXITCODE -ne 0) { throw "git config user.name failed" }
+          git tag -a "$tagName" -m "Build version $sanitizedBuildNumber"
+          if ($LASTEXITCODE -ne 0) { throw "git tag failed with exit code $LASTEXITCODE" }
+          git push origin "$tagName"
+          if ($LASTEXITCODE -ne 0) { throw "git push tag failed with exit code $LASTEXITCODE" }
