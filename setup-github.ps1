@@ -1250,6 +1250,7 @@ function Ensure-GitHubForkForSharedWorkflows {
     }
 
     $selectedForkFullName = $null
+    $createdNewFork = $false
     $selectedAction = $menuActions[$selection]
     if ($selectedAction.Type -eq 'UseExisting') {
         $selectedForkFullName = $selectedAction.FullName
@@ -1285,6 +1286,9 @@ function Ensure-GitHubForkForSharedWorkflows {
             else {
                 throw "Failed to create fork '$selectedForkFullName': $errText"
             }
+        }
+        else {
+            $createdNewFork = $true
         }
     }
 
@@ -1338,11 +1342,40 @@ function Ensure-GitHubForkForSharedWorkflows {
 
         $localHash = (& git rev-parse HEAD).Trim()
         $upstreamHash = (& git rev-parse $upstreamRef).Trim()
+        $matchesCanonicalUpstreamDefault = $false
+
+        $canonicalUpstreamSource = Resolve-UpstreamGitRemoteSource -ConfiguredSource $UpstreamFullName -GitHubFullName $UpstreamFullName
+        if (-not [string]::IsNullOrWhiteSpace($canonicalUpstreamSource)) {
+            & git remote remove upstream-github 2>$null | Out-Null
+            & git remote add upstream-github $canonicalUpstreamSource 2>&1 | Out-Null
+            if ($LASTEXITCODE -eq 0) {
+                & git fetch upstream-github $defaultBranch 2>&1 | Out-Null
+                if ($LASTEXITCODE -eq 0) {
+                    $canonicalUpstreamHash = (& git rev-parse "upstream-github/$defaultBranch").Trim()
+                    $matchesCanonicalUpstreamDefault = ($localHash -eq $canonicalUpstreamHash)
+                }
+            }
+        }
 
         if ($localHash -eq $upstreamHash) {
             Write-Host "Fork is already up to date for ref '$Reference'."
         }
         else {
+            if ($createdNewFork -or $matchesCanonicalUpstreamDefault) {
+                Write-Host "Fresh fork detected. Aligning '$selectedForkFullName' '$defaultBranch' to ref '$Reference'..." -ForegroundColor Yellow
+
+                & git reset --hard $upstreamRef 2>&1 | Out-Host
+                if ($LASTEXITCODE -ne 0) {
+                    throw "Failed to align new fork '$selectedForkFullName' to ref '$Reference'."
+                }
+
+                & git push --force-with-lease origin $defaultBranch 2>&1 | Out-Host
+                if ($LASTEXITCODE -ne 0) { throw "Git push failed." }
+
+                Write-Host "Fork aligned successfully."
+                return Get-GitHubRepo -Owner $forkOwnerName -Repo $forkRepoName
+            }
+
             & git merge-base --is-ancestor HEAD $upstreamRef
             $canFastForward = ($LASTEXITCODE -eq 0)
 
@@ -1366,18 +1399,42 @@ function Ensure-GitHubForkForSharedWorkflows {
                     Write-Host "Fork is ahead of upstream for ref '$Reference'." -ForegroundColor Yellow
                 }
                 else {
-                    if (Read-YesNo -Prompt "Fork '$selectedForkFullName' has diverged from upstream. Attempt rebase to update?" ) {
-                        Write-Host "Rebasing fork onto upstream ref..." -ForegroundColor Yellow
-                        & git rebase $upstreamRef 2>&1 | Out-Host
-                        if ($LASTEXITCODE -ne 0) {
-                            throw "Git rebase failed - resolve conflicts manually in '$selectedForkFullName'."
+                    $divergedMenuItems = @(
+                        "Rebase '$selectedForkFullName' onto ref '$Reference'",
+                        "Reset '$selectedForkFullName' '$defaultBranch' to ref '$Reference' (force push)",
+                        "Leave '$selectedForkFullName' unchanged"
+                    )
+                    $divergedSelection = Select-FromMenu -Title "Fork '$selectedForkFullName' has diverged from upstream. Choose how to update it." -Items $divergedMenuItems
+
+                    switch ($divergedSelection) {
+                        0 {
+                            Write-Host "Rebasing fork onto upstream ref..." -ForegroundColor Yellow
+                            & git rebase $upstreamRef 2>&1 | Out-Host
+                            if ($LASTEXITCODE -ne 0) {
+                                throw "Git rebase failed - resolve conflicts manually in '$selectedForkFullName'."
+                            }
+
+                            Write-Host "Pushing rebased branch (force-with-lease)..." -ForegroundColor Yellow
+                            & git push --force-with-lease origin $defaultBranch 2>&1 | Out-Host
+                            if ($LASTEXITCODE -ne 0) { throw "Git push failed." }
+
+                            Write-Host "Fork updated successfully."
                         }
+                        1 {
+                            Write-Host "Resetting fork to ref '$Reference' and force pushing..." -ForegroundColor Yellow
+                            & git reset --hard $upstreamRef 2>&1 | Out-Host
+                            if ($LASTEXITCODE -ne 0) {
+                                throw "Failed to reset fork '$selectedForkFullName' to ref '$Reference'."
+                            }
 
-                        Write-Host "Pushing rebased branch (force-with-lease)..." -ForegroundColor Yellow
-                        & git push --force-with-lease origin $defaultBranch 2>&1 | Out-Host
-                        if ($LASTEXITCODE -ne 0) { throw "Git push failed." }
+                            & git push --force-with-lease origin $defaultBranch 2>&1 | Out-Host
+                            if ($LASTEXITCODE -ne 0) { throw "Git push failed." }
 
-                        Write-Host "Fork updated successfully."
+                            Write-Host "Fork updated successfully."
+                        }
+                        default {
+                            Write-Host "Leaving fork unchanged." -ForegroundColor Yellow
+                        }
                     }
                 }
             }

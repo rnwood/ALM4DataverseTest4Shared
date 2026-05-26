@@ -1253,16 +1253,38 @@ try {
             }
             else {
                 # Diverged
-                if (Read-YesNo -Prompt "The shared repo '$sharedRepoName' has diverged from the shared repo with local changes. Attempt rebase to update?") {
-                    Write-Host "Rebasing..." -ForegroundColor Yellow
-                    & git rebase $upstreamRef
-                    if ($LASTEXITCODE -ne 0) { throw "Git rebase failed - this script can't handle conflicts. You need to rebase your local changes manually." }
-                        
-                    Write-Host "Pushing rebased branch (force-with-lease)..." -ForegroundColor Yellow
-                    & git -c "http.extraheader=AUTHORIZATION: bearer $azDevOpsAccessToken" push --force-with-lease origin
-                    if ($LASTEXITCODE -ne 0) { throw "Git push failed" }
-                        
-                    Write-Host "Repository updated successfully."
+                $divergedMenuItems = @(
+                    "Rebase '$sharedRepoName' onto ref '$ALM4DataverseRef'",
+                    "Reset '$sharedRepoName' to ref '$ALM4DataverseRef' (force push)",
+                    "Leave '$sharedRepoName' unchanged"
+                )
+                $divergedSelection = Select-FromMenu -Title "The shared repo '$sharedRepoName' has diverged. Choose how to update it." -Items $divergedMenuItems
+
+                switch ($divergedSelection) {
+                    0 {
+                        Write-Host "Rebasing..." -ForegroundColor Yellow
+                        & git rebase $upstreamRef
+                        if ($LASTEXITCODE -ne 0) { throw "Git rebase failed - this script can't handle conflicts. You need to rebase your local changes manually." }
+                            
+                        Write-Host "Pushing rebased branch (force-with-lease)..." -ForegroundColor Yellow
+                        & git -c "http.extraheader=AUTHORIZATION: bearer $azDevOpsAccessToken" push --force-with-lease origin
+                        if ($LASTEXITCODE -ne 0) { throw "Git push failed" }
+                            
+                        Write-Host "Repository updated successfully."
+                    }
+                    1 {
+                        Write-Host "Resetting shared repository to ref '$ALM4DataverseRef' and force pushing..." -ForegroundColor Yellow
+                        & git reset --hard $upstreamRef
+                        if ($LASTEXITCODE -ne 0) { throw "Git reset failed" }
+
+                        & git -c "http.extraheader=AUTHORIZATION: bearer $azDevOpsAccessToken" push --force-with-lease origin
+                        if ($LASTEXITCODE -ne 0) { throw "Git push failed" }
+
+                        Write-Host "Repository updated successfully."
+                    }
+                    default {
+                        Write-Host "Leaving shared repository unchanged." -ForegroundColor Yellow
+                    }
                 }
             }
         }
