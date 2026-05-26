@@ -23,7 +23,7 @@ on:
   workflow_dispatch:
     inputs:
       build-run-name:
-        description: 'BUILD name to deploy (for example repo-main-2026-05-26-143015-4). Actions UI titles and numeric run IDs also work.'
+        description: 'Exact BUILD name to deploy (for example repo-main-4). Numeric run IDs also work.'
         required: true
         type: string
       target-environment:
