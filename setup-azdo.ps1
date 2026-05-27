@@ -355,7 +355,7 @@ if ($upstreamRepo -like '__*') {
         $upstreamRepo = $PSScriptRoot
     } else {
         Write-Host "Development mode: Using default GitHub URL as upstream repo" -ForegroundColor Yellow
-        $upstreamRepo = 'https://github.com/rnwood/ALM4Dataverse.git'
+        $upstreamRepo = 'https://github.com/ALM4Dataverse/ALM4Dataverse.git'
     }
 }
 
@@ -2559,7 +2559,7 @@ function Get-PowerPlatformSCCredentials {
     # 4. Show Menu
     Write-Host ""
     Write-Host "Service Principal credentials are used to authenticate the pipeline to Dataverse." -ForegroundColor Green
-    Write-Host "Learn more: https://github.com/rnwood/ALM4Dataverse/tree/$ALM4DataverseRef/docs/config/environment-service-connection.md" -ForegroundColor Green
+    Write-Host "Learn more: https://github.com/ALM4Dataverse/ALM4Dataverse/tree/$ALM4DataverseRef/docs/config/environment-service-connection.md" -ForegroundColor Green
     Write-Host ""
     
     $selection = Select-FromMenu -Title "Select Service Principal credentials for '$EnvironmentName'" -Items $menuItems
@@ -2720,7 +2720,7 @@ function Get-DataverseServiceAccountUPN {
     Write-Host ""
     Write-Host "Service Account credentials are used for ownership and licencing of Cloud Flows." -ForegroundColor Green
     Write-Host "This must be a licenced user account with System Administrator role." -ForegroundColor Green
-    Write-Host "Learn more: https://github.com/rnwood/ALM4Dataverse/tree/$ALM4DataverseRef/docs/config/environment-service-connection.md" -ForegroundColor Green
+    Write-Host "Learn more: https://github.com/ALM4Dataverse/ALM4Dataverse/tree/$ALM4DataverseRef/docs/config/environment-service-connection.md" -ForegroundColor Green
     Write-Host ""
     
     $selection = Select-FromMenu -Title "Select Dataverse Service Account for '$EnvironmentName'" -Items $menuItems
@@ -3952,4 +3952,4 @@ Write-Host "Access your Azure DevOps project at" -ForegroundColor Green
 Write-Host "https://dev.azure.com/$orgName/$($selectedProject.Name)/_build" -ForegroundColor Green
 Write-Host ""
 Write-Host "Next steps:" -ForegroundColor Green
-Write-Host "https://github.com/rnwood/ALM4Dataverse/tree/$ALM4DataverseRef#getting-started" -ForegroundColor Green
+Write-Host "https://github.com/ALM4Dataverse/ALM4Dataverse/tree/$ALM4DataverseRef#getting-started" -ForegroundColor Green
