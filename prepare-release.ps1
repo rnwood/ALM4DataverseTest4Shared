@@ -95,6 +95,22 @@ Write-Host ""
 $Alm4DataverseRefPlaceholder       = '__ALM4DATAVERSE_REF__'
 $RnwoodDataverseVersionPlaceholder = '__RNWOOD_DATAVERSE_VERSION__'
 $UpstreamRepoPlaceholder           = '__UPSTREAM_REPO__'
+$SetupCommonLibPlaceholder         = '__SETUP_COMMON_LIB__'
+
+$CommonLibraryFile = Join-Path $ScriptDir 'setup-common.ps1'
+if (-not (Test-Path $CommonLibraryFile)) {
+    Write-Host "ERROR: Common library file not found: $CommonLibraryFile" -ForegroundColor Red
+    exit 1
+}
+
+try {
+    $commonLibraryContent = Get-Content -Path $CommonLibraryFile -Raw
+    $commonLibraryContent = ($commonLibraryContent -split "`r?`n" | ForEach-Object { "    $_" }) -join [Environment]::NewLine
+}
+catch {
+    Write-Host "ERROR: Could not read $CommonLibraryFile`: $($_.Exception.Message)" -ForegroundColor Red
+    exit 1
+}
 
 # Create output directory
 if (-not (Test-Path $OutputDir)) {
@@ -129,6 +145,7 @@ function Invoke-ProcessSetupScript {
     $content = $content -replace [regex]::Escape($Alm4DataverseRefPlaceholder),       $TagName
     $content = $content -replace [regex]::Escape($RnwoodDataverseVersionPlaceholder), $DataverseVersion
     $content = $content -replace [regex]::Escape($UpstreamRepoPlaceholder),           $UpstreamRepo
+    $content = $content.Replace($SetupCommonLibPlaceholder, $commonLibraryContent)
 
     try {
         Set-Content -Path $OutputFile -Value $content -NoNewline
@@ -172,7 +189,7 @@ Invoke-ProcessSetupScript `
     -SourceFile  (Join-Path $ScriptDir 'setup-azdo.ps1') `
     -OutputFile  (Join-Path $OutputDir 'setup-azdo.ps1') `
     -ScriptLabel 'setup-azdo.ps1' `
-    -PlaceholdersToVerify @($Alm4DataverseRefPlaceholder, $RnwoodDataverseVersionPlaceholder, $UpstreamRepoPlaceholder)
+    -PlaceholdersToVerify @($Alm4DataverseRefPlaceholder, $RnwoodDataverseVersionPlaceholder, $UpstreamRepoPlaceholder, $SetupCommonLibPlaceholder)
 
 # Step 3: Process setup-github.ps1
 Write-Host "Step 3: Processing setup-github.ps1 ..." -ForegroundColor Yellow
@@ -180,7 +197,7 @@ Invoke-ProcessSetupScript `
     -SourceFile  (Join-Path $ScriptDir 'setup-github.ps1') `
     -OutputFile  (Join-Path $OutputDir 'setup-github.ps1') `
     -ScriptLabel 'setup-github.ps1' `
-    -PlaceholdersToVerify @($Alm4DataverseRefPlaceholder, $RnwoodDataverseVersionPlaceholder)
+    -PlaceholdersToVerify @($Alm4DataverseRefPlaceholder, $RnwoodDataverseVersionPlaceholder, $SetupCommonLibPlaceholder)
 
 # Step 4: Display summary
 Write-Host "==========================================" -ForegroundColor Cyan
