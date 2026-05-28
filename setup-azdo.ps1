@@ -355,7 +355,7 @@ if ($upstreamRepo -like '__*') {
         $upstreamRepo = $PSScriptRoot
     } else {
         Write-Host "Development mode: Using default GitHub URL as upstream repo" -ForegroundColor Yellow
-        $upstreamRepo = 'https://github.com/rnwood/ALM4Dataverse.git'
+        $upstreamRepo = 'https://github.com/ALM4Dataverse/ALM4Dataverse.git'
     }
 }
 
@@ -1253,16 +1253,38 @@ try {
             }
             else {
                 # Diverged
-                if (Read-YesNo -Prompt "The shared repo '$sharedRepoName' has diverged from the shared repo with local changes. Attempt rebase to update?") {
-                    Write-Host "Rebasing..." -ForegroundColor Yellow
-                    & git rebase $upstreamRef
-                    if ($LASTEXITCODE -ne 0) { throw "Git rebase failed - this script can't handle conflicts. You need to rebase your local changes manually." }
-                        
-                    Write-Host "Pushing rebased branch (force-with-lease)..." -ForegroundColor Yellow
-                    & git -c "http.extraheader=AUTHORIZATION: bearer $azDevOpsAccessToken" push --force-with-lease origin
-                    if ($LASTEXITCODE -ne 0) { throw "Git push failed" }
-                        
-                    Write-Host "Repository updated successfully."
+                $divergedMenuItems = @(
+                    "Rebase '$sharedRepoName' onto ref '$ALM4DataverseRef'",
+                    "Reset '$sharedRepoName' to ref '$ALM4DataverseRef' (force push)",
+                    "Leave '$sharedRepoName' unchanged"
+                )
+                $divergedSelection = Select-FromMenu -Title "The shared repo '$sharedRepoName' has diverged. Choose how to update it." -Items $divergedMenuItems
+
+                switch ($divergedSelection) {
+                    0 {
+                        Write-Host "Rebasing..." -ForegroundColor Yellow
+                        & git rebase $upstreamRef
+                        if ($LASTEXITCODE -ne 0) { throw "Git rebase failed - this script can't handle conflicts. You need to rebase your local changes manually." }
+                            
+                        Write-Host "Pushing rebased branch (force-with-lease)..." -ForegroundColor Yellow
+                        & git -c "http.extraheader=AUTHORIZATION: bearer $azDevOpsAccessToken" push --force-with-lease origin
+                        if ($LASTEXITCODE -ne 0) { throw "Git push failed" }
+                            
+                        Write-Host "Repository updated successfully."
+                    }
+                    1 {
+                        Write-Host "Resetting shared repository to ref '$ALM4DataverseRef' and force pushing..." -ForegroundColor Yellow
+                        & git reset --hard $upstreamRef
+                        if ($LASTEXITCODE -ne 0) { throw "Git reset failed" }
+
+                        & git -c "http.extraheader=AUTHORIZATION: bearer $azDevOpsAccessToken" push --force-with-lease origin
+                        if ($LASTEXITCODE -ne 0) { throw "Git push failed" }
+
+                        Write-Host "Repository updated successfully."
+                    }
+                    default {
+                        Write-Host "Leaving shared repository unchanged." -ForegroundColor Yellow
+                    }
                 }
             }
         }
@@ -2537,7 +2559,7 @@ function Get-PowerPlatformSCCredentials {
     # 4. Show Menu
     Write-Host ""
     Write-Host "Service Principal credentials are used to authenticate the pipeline to Dataverse." -ForegroundColor Green
-    Write-Host "Learn more: https://github.com/rnwood/ALM4Dataverse/tree/$ALM4DataverseRef/docs/config/environment-service-connection.md" -ForegroundColor Green
+    Write-Host "Learn more: https://github.com/ALM4Dataverse/ALM4Dataverse/tree/$ALM4DataverseRef/docs/config/environment-service-connection.md" -ForegroundColor Green
     Write-Host ""
     
     $selection = Select-FromMenu -Title "Select Service Principal credentials for '$EnvironmentName'" -Items $menuItems
@@ -2698,7 +2720,7 @@ function Get-DataverseServiceAccountUPN {
     Write-Host ""
     Write-Host "Service Account credentials are used for ownership and licencing of Cloud Flows." -ForegroundColor Green
     Write-Host "This must be a licenced user account with System Administrator role." -ForegroundColor Green
-    Write-Host "Learn more: https://github.com/rnwood/ALM4Dataverse/tree/$ALM4DataverseRef/docs/config/environment-service-connection.md" -ForegroundColor Green
+    Write-Host "Learn more: https://github.com/ALM4Dataverse/ALM4Dataverse/tree/$ALM4DataverseRef/docs/config/environment-service-connection.md" -ForegroundColor Green
     Write-Host ""
     
     $selection = Select-FromMenu -Title "Select Dataverse Service Account for '$EnvironmentName'" -Items $menuItems
@@ -3930,4 +3952,4 @@ Write-Host "Access your Azure DevOps project at" -ForegroundColor Green
 Write-Host "https://dev.azure.com/$orgName/$($selectedProject.Name)/_build" -ForegroundColor Green
 Write-Host ""
 Write-Host "Next steps:" -ForegroundColor Green
-Write-Host "https://github.com/rnwood/ALM4Dataverse/tree/$ALM4DataverseRef#getting-started" -ForegroundColor Green
+Write-Host "https://github.com/ALM4Dataverse/ALM4Dataverse/tree/$ALM4DataverseRef#getting-started" -ForegroundColor Green

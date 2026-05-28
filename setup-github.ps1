@@ -1250,6 +1250,7 @@ function Ensure-GitHubForkForSharedWorkflows {
     }
 
     $selectedForkFullName = $null
+    $createdNewFork = $false
     $selectedAction = $menuActions[$selection]
     if ($selectedAction.Type -eq 'UseExisting') {
         $selectedForkFullName = $selectedAction.FullName
@@ -1285,6 +1286,9 @@ function Ensure-GitHubForkForSharedWorkflows {
             else {
                 throw "Failed to create fork '$selectedForkFullName': $errText"
             }
+        }
+        else {
+            $createdNewFork = $true
         }
     }
 
@@ -1338,11 +1342,40 @@ function Ensure-GitHubForkForSharedWorkflows {
 
         $localHash = (& git rev-parse HEAD).Trim()
         $upstreamHash = (& git rev-parse $upstreamRef).Trim()
+        $matchesCanonicalUpstreamDefault = $false
+
+        $canonicalUpstreamSource = Resolve-UpstreamGitRemoteSource -ConfiguredSource $UpstreamFullName -GitHubFullName $UpstreamFullName
+        if (-not [string]::IsNullOrWhiteSpace($canonicalUpstreamSource)) {
+            & git remote remove upstream-github 2>$null | Out-Null
+            & git remote add upstream-github $canonicalUpstreamSource 2>&1 | Out-Null
+            if ($LASTEXITCODE -eq 0) {
+                & git fetch upstream-github $defaultBranch 2>&1 | Out-Null
+                if ($LASTEXITCODE -eq 0) {
+                    $canonicalUpstreamHash = (& git rev-parse "upstream-github/$defaultBranch").Trim()
+                    $matchesCanonicalUpstreamDefault = ($localHash -eq $canonicalUpstreamHash)
+                }
+            }
+        }
 
         if ($localHash -eq $upstreamHash) {
             Write-Host "Fork is already up to date for ref '$Reference'."
         }
         else {
+            if ($createdNewFork -or $matchesCanonicalUpstreamDefault) {
+                Write-Host "Fresh fork detected. Aligning '$selectedForkFullName' '$defaultBranch' to ref '$Reference'..." -ForegroundColor Yellow
+
+                & git reset --hard $upstreamRef 2>&1 | Out-Host
+                if ($LASTEXITCODE -ne 0) {
+                    throw "Failed to align new fork '$selectedForkFullName' to ref '$Reference'."
+                }
+
+                & git push --force-with-lease origin $defaultBranch 2>&1 | Out-Host
+                if ($LASTEXITCODE -ne 0) { throw "Git push failed." }
+
+                Write-Host "Fork aligned successfully."
+                return Get-GitHubRepo -Owner $forkOwnerName -Repo $forkRepoName
+            }
+
             & git merge-base --is-ancestor HEAD $upstreamRef
             $canFastForward = ($LASTEXITCODE -eq 0)
 
@@ -1366,18 +1399,42 @@ function Ensure-GitHubForkForSharedWorkflows {
                     Write-Host "Fork is ahead of upstream for ref '$Reference'." -ForegroundColor Yellow
                 }
                 else {
-                    if (Read-YesNo -Prompt "Fork '$selectedForkFullName' has diverged from upstream. Attempt rebase to update?" ) {
-                        Write-Host "Rebasing fork onto upstream ref..." -ForegroundColor Yellow
-                        & git rebase $upstreamRef 2>&1 | Out-Host
-                        if ($LASTEXITCODE -ne 0) {
-                            throw "Git rebase failed - resolve conflicts manually in '$selectedForkFullName'."
+                    $divergedMenuItems = @(
+                        "Rebase '$selectedForkFullName' onto ref '$Reference'",
+                        "Reset '$selectedForkFullName' '$defaultBranch' to ref '$Reference' (force push)",
+                        "Leave '$selectedForkFullName' unchanged"
+                    )
+                    $divergedSelection = Select-FromMenu -Title "Fork '$selectedForkFullName' has diverged from upstream. Choose how to update it." -Items $divergedMenuItems
+
+                    switch ($divergedSelection) {
+                        0 {
+                            Write-Host "Rebasing fork onto upstream ref..." -ForegroundColor Yellow
+                            & git rebase $upstreamRef 2>&1 | Out-Host
+                            if ($LASTEXITCODE -ne 0) {
+                                throw "Git rebase failed - resolve conflicts manually in '$selectedForkFullName'."
+                            }
+
+                            Write-Host "Pushing rebased branch (force-with-lease)..." -ForegroundColor Yellow
+                            & git push --force-with-lease origin $defaultBranch 2>&1 | Out-Host
+                            if ($LASTEXITCODE -ne 0) { throw "Git push failed." }
+
+                            Write-Host "Fork updated successfully."
                         }
+                        1 {
+                            Write-Host "Resetting fork to ref '$Reference' and force pushing..." -ForegroundColor Yellow
+                            & git reset --hard $upstreamRef 2>&1 | Out-Host
+                            if ($LASTEXITCODE -ne 0) {
+                                throw "Failed to reset fork '$selectedForkFullName' to ref '$Reference'."
+                            }
 
-                        Write-Host "Pushing rebased branch (force-with-lease)..." -ForegroundColor Yellow
-                        & git push --force-with-lease origin $defaultBranch 2>&1 | Out-Host
-                        if ($LASTEXITCODE -ne 0) { throw "Git push failed." }
+                            & git push --force-with-lease origin $defaultBranch 2>&1 | Out-Host
+                            if ($LASTEXITCODE -ne 0) { throw "Git push failed." }
 
-                        Write-Host "Fork updated successfully."
+                            Write-Host "Fork updated successfully."
+                        }
+                        default {
+                            Write-Host "Leaving fork unchanged." -ForegroundColor Yellow
+                        }
                     }
                 }
             }
@@ -2388,6 +2445,12 @@ function Update-DeployWorkflowInRepoClone {
     $lines = New-Object System.Collections.Generic.List[string]
 
     $lines.Add("name: DEPLOY-$Branch")
+    if ($PromotionMode -eq 'environment-approval') {
+        $lines.Add('run-name: ${{ github.event_name == ''workflow_dispatch'' && format(''Deploy {0} <- {1}'', github.event.inputs[''target-environment''] || ''auto'', github.event.inputs[''build-run-name''] || github.event.inputs[''build-run-id'']) || format(''Deploy auto <- {0}'', github.event.workflow_run.display_title || github.event.workflow_run.id) }}')
+    }
+    else {
+        $lines.Add('run-name: ${{ github.event_name == ''workflow_dispatch'' && format(''Deploy {0} <- {1}'', github.event.inputs[''target-environment''], github.event.inputs[''build-run-name''] || github.event.inputs[''build-run-id'']) || format(''Deploy auto <- {0}'', github.event.workflow_run.display_title || github.event.workflow_run.id) }}')
+    }
     $lines.Add("")
     $lines.Add('# Stage-per-environment deployment workflow (generated by setup-github.ps1).')
     $lines.Add('#')
@@ -2395,6 +2458,7 @@ function Update-DeployWorkflowInRepoClone {
     $lines.Add('#   1. Add it to workflow_dispatch target-environment options.')
     $lines.Add('#   2. Add a deploy-* job and chain needs to the previous stage.')
     $lines.Add('#   3. Set previous-environment-name to the previous stage short name.')
+    $lines.Add('#   4. In environment-approval mode, keep the workflow_run trigger enabled.')
     $lines.Add('')
     $lines.Add('permissions:')
     $lines.Add('  actions: read')
@@ -2402,25 +2466,36 @@ function Update-DeployWorkflowInRepoClone {
     $lines.Add('  id-token: write')
     $lines.Add('')
     $lines.Add('on:')
-    $lines.Add('  workflow_run:')
-    $lines.Add("    workflows: ['BUILD']")
-    $lines.Add('    types: [completed]')
-    $lines.Add("    branches: [ '$Branch' ]")
+    if ($PromotionMode -eq 'environment-approval') {
+        $lines.Add('  workflow_run:')
+        $lines.Add("    workflows: ['BUILD']")
+        $lines.Add('    types: [completed]')
+        $lines.Add("    branches: [ '$Branch' ]")
+    }
     $lines.Add('  workflow_dispatch:')
     $lines.Add('    inputs:')
-    $lines.Add('      build-run-id:')
-    $lines.Add("        description: 'BUILD workflow run ID to deploy (find in Actions tab)'")
+    $lines.Add('      build-run-name:')
+    $lines.Add("        description: 'Exact BUILD name to deploy (for example repo-main-2025-05-27T14:23:11Z-4). Numeric run IDs also work.'")
     $lines.Add('        required: true')
     $lines.Add('        type: string')
     $lines.Add('      target-environment:')
-    $lines.Add("        description: 'Target environment to deploy to'")
-    $lines.Add('        required: true')
-    $lines.Add('        type: choice')
-    $lines.Add('        options:')
+    if ($PromotionMode -eq 'environment-approval') {
+        $validEnvironmentList = ($DeploymentEnvironments | ForEach-Object { $_.ShortName }) -join ', '
+        $validEnvironmentListEscaped = $validEnvironmentList.Replace("'", "''")
+        $lines.Add("        description: 'Optional target environment. Leave blank to start from the first configured stage. Valid values: $validEnvironmentListEscaped.'")
+        $lines.Add('        required: false')
+        $lines.Add('        type: string')
+    }
+    else {
+        $lines.Add("        description: 'Target environment to deploy to'")
+        $lines.Add('        required: true')
+        $lines.Add('        type: choice')
+        $lines.Add('        options:')
 
-    foreach ($env in $DeploymentEnvironments) {
-        $envNameEscaped = ([string]$env.ShortName).Replace("'", "''")
-        $lines.Add("          - '$envNameEscaped'")
+        foreach ($env in $DeploymentEnvironments) {
+            $envNameEscaped = ([string]$env.ShortName).Replace("'", "''")
+            $lines.Add("          - '$envNameEscaped'")
+        }
     }
 
     $lines.Add('')
@@ -2450,11 +2525,26 @@ function Update-DeployWorkflowInRepoClone {
         $lines.Add("  ${jobId}:")
         if ($i -eq 0) {
             $lines.Add('    # First stage in the chain.')
+            if ($PromotionMode -eq 'manual-gate-tag') {
+                $lines.Add('    # Manual-gate-tag mode requires an explicit workflow_dispatch, even for stage 1.')
+            }
         }
         else {
             $lines.Add("    needs: $previousJobId")
-            $lines.Add('    # Keep always() so manual promotion can run when previous stages are skipped.')
-            $lines.Add('    if: ${{ always() }}')
+            $lines.Add('    # Allow manual targeted deploys even when earlier jobs are skipped in this run,')
+            $lines.Add('    # but do not bypass failed prerequisite stages on automatic runs.')
+            if ($PromotionMode -eq 'environment-approval') {
+                $lines.Add('    if: >-')
+                $lines.Add('      (')
+                $lines.Add("        github.event_name == 'workflow_dispatch' &&")
+                $lines.Add(("        inputs.target-environment == '{0}'" -f $envNameEscaped))
+                $lines.Add('      ) || (')
+                $lines.Add(("        (github.event_name != 'workflow_dispatch' || inputs.target-environment == '') && needs['{0}'].result == 'success'" -f $previousJobId))
+                $lines.Add('      )')
+            }
+            else {
+                $lines.Add(('    if: ${{{{ github.event_name == ''workflow_dispatch'' || needs[''{0}''].result == ''success'' }}}}' -f $previousJobId))
+            }
         }
 
         $lines.Add("    uses: $usesRef")

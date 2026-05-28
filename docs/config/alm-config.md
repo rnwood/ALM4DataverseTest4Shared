@@ -45,7 +45,7 @@ Paths are relative to the repository root. This is useful for including data mig
 
 Hook scripts are executed at various stages of the build, export, and deployment processes and can be used to add custom steps. Each hook is a list of script paths relative to the repository root that will be executed at one stage of the standard process. 'Pre' hooks occur before the standard steps and 'post' hooks occur after.
 
-Scripts can use the built-in `Rnwood.Dataverse.Data.PowerShell` PowerShell module to complete a wide range of activities. [See the project site](https://github.com/rnwood/Rnwood.Dataverse.Data.PowerShell) for full documentation. The current environment is automatically set to the target environment.
+Scripts can use the built-in `Rnwood.Dataverse.Data.PowerShell` PowerShell module to complete a wide range of activities. [See the project site](https://github.com/ALM4Dataverse/Rnwood.Dataverse.Data.PowerShell) for full documentation. The current environment is automatically set to the target environment.
 
 You can also include any other PowerShell module from the [PowerShell Gallery](https://powershellgallery.com) by including it in the `scriptDependencies` section. See below.
 
