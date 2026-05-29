@@ -321,8 +321,6 @@ function New-AzDoProject {
     }
 
     # Use VSTeam command to create project - it handles async operation polling automatically
-    Write-Host "Creating project using process template: $selectedProcessName" -ForegroundColor Yellow
-    
     try {
         # Note: Add-VSTeamProject uses -ProjectName instead of -Name and doesn't have VersionControlSource
         $addParams = @{
@@ -330,9 +328,10 @@ function New-AzDoProject {
             ProcessTemplate = $selectedProcessName
             Visibility      = $Visibility
         }
-        
-        
-        $created = Add-VSTeamProject @addParams
+
+        $created = Invoke-WithSpectreStatus -Status "Creating project '$ProjectName' using process template '$selectedProcessName'..." -ScriptBlock {
+            Add-VSTeamProject @addParams
+        }
         
         if ($created -and $created.name) {
             Write-Host "Project '$ProjectName' created successfully."
@@ -443,6 +442,74 @@ function Wait-AzDoGitRepositoryImport {
     }
 
     throw "Timed out waiting for repository import to complete after $TimeoutSeconds seconds."
+}
+
+function Get-AzDoSharedRepositorySyncState {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory)][string]$RepositoryRemoteUrl,
+        [Parameter(Mandatory)][string]$WorkRoot,
+        [Parameter(Mandatory)][string]$UpstreamGitSource,
+        [Parameter(Mandatory)][string]$Reference,
+        [Parameter(Mandatory)][string]$AccessToken
+    )
+
+    & git -c "http.extraheader=AUTHORIZATION: bearer $AccessToken" clone $RepositoryRemoteUrl $WorkRoot | Out-Null
+    if ($LASTEXITCODE -ne 0) {
+        throw "Git clone failed with exit code $LASTEXITCODE"
+    }
+
+    & git -C $WorkRoot remote add upstream $UpstreamGitSource | Out-Null
+    & git -C $WorkRoot fetch upstream | Out-Null
+
+    & git -C $WorkRoot ls-remote --exit-code upstream $Reference | Out-Null
+    if ($LASTEXITCODE -eq 2) {
+        throw "Could not resolve reference '$Reference' from upstream repository."
+    }
+    if ($LASTEXITCODE -ne 0) {
+        throw "Git ls-remote failed with exit code $LASTEXITCODE"
+    }
+
+    $lsRemoteOutput = (& git -C $WorkRoot ls-remote upstream $Reference | Select-Object -First 1)
+    if ($lsRemoteOutput -match '^([a-f0-9]+)\s+(.+)$') {
+        $commitSha = $Matches[1]
+        $fullRef = $Matches[2]
+        if ($fullRef -match '^refs/heads/(.+)$') {
+            $targetRef = "upstream/$($Matches[1])"
+        }
+        elseif ($fullRef -match '^refs/tags/') {
+            $targetRef = $commitSha
+        }
+        else {
+            $targetRef = $Reference
+        }
+    }
+    else {
+        $targetRef = $Reference
+    }
+
+    $localHash = (& git -C $WorkRoot rev-parse HEAD).Trim()
+    $upstreamHash = (& git -C $WorkRoot rev-parse $targetRef).Trim()
+
+    $canFastForward = $false
+    $isAhead = $false
+    if ($localHash -ne $upstreamHash) {
+        & git -C $WorkRoot merge-base --is-ancestor HEAD $targetRef
+        $canFastForward = ($LASTEXITCODE -eq 0)
+
+        if (-not $canFastForward) {
+            & git -C $WorkRoot merge-base --is-ancestor $targetRef HEAD
+            $isAhead = ($LASTEXITCODE -eq 0)
+        }
+    }
+
+    return [pscustomobject]@{
+        UpstreamRef    = $targetRef
+        LocalHash      = $localHash
+        UpstreamHash   = $upstreamHash
+        CanFastForward = $canFastForward
+        IsAhead        = $isAhead
+    }
 }
 
 Set-SetupPhaseContext -PhaseNames $script:setupPhaseNames -CurrentPhaseIndex 1
@@ -754,72 +821,29 @@ function Initialize-AzDoProjectAndRepositories {
         New-Item -ItemType Directory -Path $workRoot -Force | Out-Null
 
         try {
-            Write-Host "Checking shared repository status against shared repo..." -ForegroundColor DarkGray
-
-            & git -c "http.extraheader=AUTHORIZATION: bearer $azDevOpsAccessToken" clone $destUrl $workRoot | Out-Null
-            if ($LASTEXITCODE -ne 0) {
-                throw "Git clone failed with exit code $LASTEXITCODE"
+            $sharedRepoSyncState = Invoke-WithSpectreStatus -Status "Checking shared repository '$sharedRepoName' against upstream..." -ScriptBlock {
+                Get-AzDoSharedRepositorySyncState -RepositoryRemoteUrl $destUrl -WorkRoot $workRoot -UpstreamGitSource $sharedSourceUrl -Reference $ALM4DataverseRef -AccessToken $azDevOpsAccessToken
             }
 
-            Push-Location $workRoot
-
-            & git remote add upstream $sharedSourceUrl | Out-Null
-            & git fetch upstream | Out-Null
-
-            & git ls-remote --exit-code upstream $ALM4DataverseRef | Out-Null
-            if ($LASTEXITCODE -eq 2) {
-                throw "Could not resolve reference '$ALM4DataverseRef' from upstream repository."
-            }
-            if ($LASTEXITCODE -ne 0) {
-                throw "Git ls-remote failed with exit code $LASTEXITCODE"
-            }
-
-            $lsRemoteOutput = (& git ls-remote upstream $ALM4DataverseRef | Select-Object -First 1)
-            if ($lsRemoteOutput -match '^([a-f0-9]+)\s+(.+)$') {
-                $commitSha = $Matches[1]
-                $fullRef = $Matches[2]
-                if ($fullRef -match '^refs/heads/(.+)$') {
-                    $targetRef = "upstream/$($Matches[1])"
-                }
-                elseif ($fullRef -match '^refs/tags/') {
-                    $targetRef = $commitSha
-                }
-                else {
-                    $targetRef = $ALM4DataverseRef
-                }
-            }
-            else {
-                $targetRef = $ALM4DataverseRef
-            }
-            $upstreamRef = $targetRef
-
-            $localHash = (& git rev-parse HEAD).Trim()
-            $upstreamHash = (& git rev-parse $upstreamRef).Trim()
-
-            if ($localHash -eq $upstreamHash) {
+            if ($sharedRepoSyncState.LocalHash -eq $sharedRepoSyncState.UpstreamHash) {
                 Write-Host "Shared repository is already up to date."
             }
             else {
-                & git merge-base --is-ancestor HEAD $upstreamRef
-                $canFastForward = ($LASTEXITCODE -eq 0)
-
-                if ($canFastForward) {
+                if ($sharedRepoSyncState.CanFastForward) {
                     if (Read-YesNo -Prompt "Updates are available from the shared repo (fast-forward). Update '$sharedRepoName'?" ) {
-                        Write-Host "Fast-forwarding..." -ForegroundColor Yellow
-                        & git merge --ff-only $upstreamRef
-                        if ($LASTEXITCODE -ne 0) { throw "Git merge failed" }
+                        Invoke-WithErrorHandling -OperationName "Fast-forwarding shared repository '$sharedRepoName'" -StatusMessage "Fast-forwarding shared repository '$sharedRepoName'..." -CaptureOutputInPanel -ScriptBlock {
+                            & git -C $workRoot merge --ff-only $sharedRepoSyncState.UpstreamRef
+                            if ($LASTEXITCODE -ne 0) { throw 'Git merge failed' }
 
-                        & git -c "http.extraheader=AUTHORIZATION: bearer $azDevOpsAccessToken" push origin
-                        if ($LASTEXITCODE -ne 0) { throw "Git push failed" }
+                            & git -C $workRoot -c "http.extraheader=AUTHORIZATION: bearer $azDevOpsAccessToken" push origin
+                            if ($LASTEXITCODE -ne 0) { throw 'Git push failed' }
+                        } | Out-Null
 
                         Write-Host "Repository updated successfully."
                     }
                 }
                 else {
-                    & git merge-base --is-ancestor $upstreamRef HEAD
-                    $isAhead = ($LASTEXITCODE -eq 0)
-
-                    if ($isAhead) {
+                    if ($sharedRepoSyncState.IsAhead) {
                         Write-Host "Shared repository is ahead of the shared repo."
                     }
                     else {
@@ -832,23 +856,24 @@ function Initialize-AzDoProjectAndRepositories {
 
                         switch ($divergedSelection) {
                             0 {
-                                Write-Host "Rebasing..." -ForegroundColor Yellow
-                                & git rebase $upstreamRef
-                                if ($LASTEXITCODE -ne 0) { throw "Git rebase failed - this script can't handle conflicts. You need to rebase your local changes manually." }
+                                Invoke-WithErrorHandling -OperationName "Rebasing shared repository '$sharedRepoName'" -StatusMessage "Rebasing shared repository '$sharedRepoName'..." -CaptureOutputInPanel -ScriptBlock {
+                                    & git -C $workRoot rebase $sharedRepoSyncState.UpstreamRef
+                                    if ($LASTEXITCODE -ne 0) { throw "Git rebase failed - this script can't handle conflicts. You need to rebase your local changes manually." }
 
-                                Write-Host "Pushing rebased branch (force-with-lease)..." -ForegroundColor Yellow
-                                & git -c "http.extraheader=AUTHORIZATION: bearer $azDevOpsAccessToken" push --force-with-lease origin
-                                if ($LASTEXITCODE -ne 0) { throw "Git push failed" }
+                                    & git -C $workRoot -c "http.extraheader=AUTHORIZATION: bearer $azDevOpsAccessToken" push --force-with-lease origin
+                                    if ($LASTEXITCODE -ne 0) { throw 'Git push failed' }
+                                } | Out-Null
 
                                 Write-Host "Repository updated successfully."
                             }
                             1 {
-                                Write-Host "Resetting shared repository to ref '$ALM4DataverseRef' and force pushing..." -ForegroundColor Yellow
-                                & git reset --hard $upstreamRef
-                                if ($LASTEXITCODE -ne 0) { throw "Git reset failed" }
+                                Invoke-WithErrorHandling -OperationName "Resetting shared repository '$sharedRepoName'" -StatusMessage "Resetting shared repository '$sharedRepoName' to '$ALM4DataverseRef'..." -CaptureOutputInPanel -ScriptBlock {
+                                    & git -C $workRoot reset --hard $sharedRepoSyncState.UpstreamRef
+                                    if ($LASTEXITCODE -ne 0) { throw 'Git reset failed' }
 
-                                & git -c "http.extraheader=AUTHORIZATION: bearer $azDevOpsAccessToken" push --force-with-lease origin
-                                if ($LASTEXITCODE -ne 0) { throw "Git push failed" }
+                                    & git -C $workRoot -c "http.extraheader=AUTHORIZATION: bearer $azDevOpsAccessToken" push --force-with-lease origin
+                                    if ($LASTEXITCODE -ne 0) { throw 'Git push failed' }
+                                } | Out-Null
 
                                 Write-Host "Repository updated successfully."
                             }
@@ -1020,8 +1045,9 @@ function Select-AzDoMainRepository {
             throw "Repository name cannot be empty."
         }
 
-        Write-Host "Creating Git repository '$newRepoName' in project '$ProjectName'..." -ForegroundColor Yellow
-        $created = Add-VSTeamGitRepository -ProjectName $ProjectName -Name $newRepoName
+        $created = Invoke-WithSpectreStatus -Status "Creating Git repository '$newRepoName' in project '$ProjectName'..." -ScriptBlock {
+            Add-VSTeamGitRepository -ProjectName $ProjectName -Name $newRepoName
+        }
         if (-not $created -or -not $created.Id) {
             throw "Failed to create Git repository '$newRepoName'."
         }
@@ -1199,8 +1225,9 @@ function Select-AzDoSharedRepository {
             continue
         }
 
-        Write-Host "Creating Git repository '$newRepoName' in project '$ProjectName'..." -ForegroundColor Yellow
-        $createdRepo = Add-VSTeamGitRepository -ProjectName $ProjectName -Name $newRepoName
+        $createdRepo = Invoke-WithSpectreStatus -Status "Creating Git repository '$newRepoName' in project '$ProjectName'..." -ScriptBlock {
+            Add-VSTeamGitRepository -ProjectName $ProjectName -Name $newRepoName
+        }
         if (-not $createdRepo -or -not $createdRepo.Id) {
             throw "Failed to create Git repository '$newRepoName'."
         }
@@ -2892,7 +2919,7 @@ function Get-DataverseSolutionsSelection {
         
         if (-not $allSolutions -or $allSolutions.Count -eq 0) {
             Write-Host "No unmanaged solutions found in the environment." -ForegroundColor Yellow
-            return @{ Solutions = @(); EnvironmentUrl = $devEnvUrl }
+            return [pscustomobject]@{ Solutions = @(); EnvironmentUrl = $devEnvUrl }
         }
         
         # Filter out system solutions and prepare for selection
@@ -2903,7 +2930,7 @@ function Get-DataverseSolutionsSelection {
         
         if (-not $userSolutions -or $userSolutions.Count -eq 0) {
             Write-Host "No user-created solutions found in the environment." -ForegroundColor Yellow
-            return @{ Solutions = @(); EnvironmentUrl = $devEnvUrl }
+            return [pscustomobject]@{ Solutions = @(); EnvironmentUrl = $devEnvUrl }
         }
 
         $selectedSolutions = @()
@@ -2933,7 +2960,7 @@ function Get-DataverseSolutionsSelection {
         
         if ($selectedSolutions.Count -eq 0) {
             Write-Host "No solutions selected." -ForegroundColor Yellow
-            return @{ Solutions = @(); EnvironmentUrl = $devEnvUrl; EnvironmentFriendlyName = $selectedEnv.FriendlyName }
+            return [pscustomobject]@{ Solutions = @(); EnvironmentUrl = $devEnvUrl; EnvironmentFriendlyName = $selectedEnv.FriendlyName }
         }
         
         Write-Host "Final selection:"
@@ -2950,7 +2977,7 @@ function Get-DataverseSolutionsSelection {
             }
         }
         
-        return @{ Solutions = $configSolutions; EnvironmentUrl = $devEnvUrl; EnvironmentFriendlyName = $selectedEnv.FriendlyName }
+        return [pscustomobject]@{ Solutions = $configSolutions; EnvironmentUrl = $devEnvUrl; EnvironmentFriendlyName = $selectedEnv.FriendlyName }
         
     }
     catch {
@@ -3759,12 +3786,14 @@ function Apply-AzDoEnvironmentConfiguration {
 $existingDevEnvironmentState = Invoke-WithSpectreStatus -Status "Inspecting existing DEV environment configuration for '$script:devEnvironmentShortName'..." -ScriptBlock {
     Get-AzDoExistingEnvironmentState -ProjectName $selectedProject.Name -EnvironmentName $script:devEnvironmentShortName -TenantId $adoAuthResult.TenantId
 }
-$solutionData = $null
-$solutions = @()
-$devEnvUrl = $null
-$devEnvFriendlyName = $null
-$devEnvironmentConfiguration = $null
-$environments = @()
+$wizardState = [pscustomobject]@{
+    SolutionData                 = $null
+    Solutions                    = @()
+    DevEnvUrl                    = $null
+    DevEnvFriendlyName           = $null
+    DevEnvironmentConfiguration  = $null
+    Environments                 = @()
+}
 
 Set-SetupPhaseContext -PhaseNames $script:setupPhaseNames -CurrentPhaseIndex 2
 Invoke-SetupWizard -Title 'Azure DevOps ALM4Dataverse setup' -Steps @(
@@ -3777,19 +3806,19 @@ Invoke-SetupWizard -Title 'Azure DevOps ALM4Dataverse setup' -Steps @(
                 'Best practice: keep them in dependency order because that is the order written into alm-config.psd1.'
             ) -DocRelativePath 'docs/config/alm-config.md' -Ref $ALM4DataverseRef
 
-            $solutionData = Invoke-WithErrorHandling -OperationName 'Selecting Dataverse Solutions' -ScriptBlock {
+            $wizardState.SolutionData = Invoke-WithErrorHandling -OperationName 'Selecting Dataverse Solutions' -ScriptBlock {
                 $existingConfigPath = Join-Path $mainRepoWorkingRoot 'alm-config.psd1'
                 Get-DataverseSolutionsSelection -ExistingConfigPath $existingConfigPath -ExistingEnvironmentUrl $existingDevEnvironmentState.Url
             }
 
-            $solutions = @($solutionData.Solutions)
-            $devEnvUrl = $solutionData.EnvironmentUrl
-            $devEnvFriendlyName = $solutionData.EnvironmentFriendlyName
+            $wizardState.Solutions = @($wizardState.SolutionData.Solutions)
+            $wizardState.DevEnvUrl = $wizardState.SolutionData.EnvironmentUrl
+            $wizardState.DevEnvFriendlyName = $wizardState.SolutionData.EnvironmentFriendlyName
 
             Invoke-WithErrorHandling -OperationName 'Updating alm-config.psd1 with Solutions' -AllowSkip -StatusMessage 'Updating alm-config.psd1 with the selected solutions...' -ScriptBlock {
-                $configUpdated = Update-AlmConfigInWorkingTree -Solutions $solutions -RepoRoot $mainRepoWorkingRoot
+                $configUpdated = Update-AlmConfigInWorkingTree -Solutions $wizardState.Solutions -RepoRoot $mainRepoWorkingRoot
                 if ($configUpdated) {
-                    Write-Host "Updated alm-config.psd1 with $($solutions.Count) solution(s) in the working tree."
+                    Write-Host "Updated alm-config.psd1 with $($wizardState.Solutions.Count) solution(s) in the working tree."
                 }
             } -CaptureOutputInPanel | Out-Null
         }
@@ -3799,9 +3828,9 @@ Invoke-SetupWizard -Title 'Azure DevOps ALM4Dataverse setup' -Steps @(
         Action = {
             Write-Section 'Configure DEV environment access'
 
-            if (-not $devEnvUrl) {
+            if (-not $wizardState.DevEnvUrl) {
                 [Spectre.Console.AnsiConsole]::MarkupLine('[yellow]No DEV environment is currently selected, so there is nothing to configure for this step yet.[/]')
-                $devEnvironmentConfiguration = $null
+                $wizardState.DevEnvironmentConfiguration = $null
                 return
             }
 
@@ -3811,11 +3840,11 @@ Invoke-SetupWizard -Title 'Azure DevOps ALM4Dataverse setup' -Steps @(
                 'Best practice: use a dedicated service account for automation ownership and a separate service principal per environment where practical.'
             ) -DocRelativePath 'docs/config/azdo-environment-service-connection.md' -Ref $ALM4DataverseRef
 
-            $devEnvironmentConfiguration = Invoke-WithErrorHandling -OperationName 'Selecting DEV environment credentials' -ScriptBlock {
+            $wizardState.DevEnvironmentConfiguration = Invoke-WithErrorHandling -OperationName 'Selecting DEV environment credentials' -ScriptBlock {
                 Get-AzDoEnvironmentConfiguration `
                     -EnvironmentName $script:devEnvironmentShortName `
-                    -EnvironmentUrl $devEnvUrl `
-                    -FriendlyName $devEnvFriendlyName `
+                    -EnvironmentUrl $wizardState.DevEnvUrl `
+                    -FriendlyName $wizardState.DevEnvFriendlyName `
                     -ExistingCredentials $credentialsCache `
                     -ExistingServiceAccounts $serviceAccountsCache `
                     -TenantId $adoAuthResult.TenantId `
@@ -3828,11 +3857,11 @@ Invoke-SetupWizard -Title 'Azure DevOps ALM4Dataverse setup' -Steps @(
                     -IsDevelopmentEnvironment $true
             }
 
-            if ($devEnvironmentConfiguration -and -not ($credentialsCache | Where-Object { $_.ApplicationId -eq $devEnvironmentConfiguration.Credentials.ApplicationId -and $_.TenantId -eq $devEnvironmentConfiguration.Credentials.TenantId })) {
-                $credentialsCache += $devEnvironmentConfiguration.Credentials
+            if ($wizardState.DevEnvironmentConfiguration -and -not ($credentialsCache | Where-Object { $_.ApplicationId -eq $wizardState.DevEnvironmentConfiguration.Credentials.ApplicationId -and $_.TenantId -eq $wizardState.DevEnvironmentConfiguration.Credentials.TenantId })) {
+                $credentialsCache += $wizardState.DevEnvironmentConfiguration.Credentials
             }
-            if ($devEnvironmentConfiguration -and $serviceAccountsCache -notcontains $devEnvironmentConfiguration.ServiceAccountUPN) {
-                $serviceAccountsCache += $devEnvironmentConfiguration.ServiceAccountUPN
+            if ($wizardState.DevEnvironmentConfiguration -and $serviceAccountsCache -notcontains $wizardState.DevEnvironmentConfiguration.ServiceAccountUPN) {
+                $serviceAccountsCache += $wizardState.DevEnvironmentConfiguration.ServiceAccountUPN
             }
         }
     },
@@ -3845,9 +3874,9 @@ Invoke-SetupWizard -Title 'Azure DevOps ALM4Dataverse setup' -Steps @(
                 'Best practice: list lower environments first because DEPLOY stages will be generated in that sequence and the summary table should mirror your intended promotion path.'
             ) -DocRelativePath 'docs/setup/azdo-manual-setup.md' -Ref $ALM4DataverseRef
 
-            $environments = @(Invoke-WithErrorHandling -OperationName 'Selecting Deployment Environments' -ScriptBlock {
+            $wizardState.Environments = @(Invoke-WithErrorHandling -OperationName 'Selecting Deployment Environments' -ScriptBlock {
                 Get-DataverseEnvironmentsSelection `
-                    -ExcludedUrl $devEnvUrl `
+                    -ExcludedUrl $wizardState.DevEnvUrl `
                     -RepoRoot $mainRepoWorkingRoot `
                     -Branch $script:mainRepoBranch `
                     -ProjectName $selectedProject.Name `
@@ -3860,7 +3889,7 @@ Invoke-SetupWizard -Title 'Azure DevOps ALM4Dataverse setup' -Steps @(
             })
 
             Invoke-WithErrorHandling -OperationName 'Updating Deployment Pipeline' -AllowSkip -StatusMessage 'Regenerating the DEPLOY pipeline stages...' -ScriptBlock {
-                Update-DeployPipelineInWorkingTree -Environments $environments -RepoRoot $mainRepoWorkingRoot -Branch $script:mainRepoBranch -UseAlm4DataverseExtension $script:useAlm4DataverseExtension
+                Update-DeployPipelineInWorkingTree -Environments $wizardState.Environments -RepoRoot $mainRepoWorkingRoot -Branch $script:mainRepoBranch -UseAlm4DataverseExtension $script:useAlm4DataverseExtension
             } -CaptureOutputInPanel | Out-Null
         }
     },
@@ -3870,10 +3899,10 @@ Invoke-SetupWizard -Title 'Azure DevOps ALM4Dataverse setup' -Steps @(
             Write-Section 'Review Dataverse environment configuration'
 
             $allConfiguredEnvironments = @()
-            if ($devEnvironmentConfiguration) {
-                $allConfiguredEnvironments += $devEnvironmentConfiguration
+            if ($wizardState.DevEnvironmentConfiguration) {
+                $allConfiguredEnvironments += $wizardState.DevEnvironmentConfiguration
             }
-            $allConfiguredEnvironments += @($environments)
+            $allConfiguredEnvironments += @($wizardState.Environments)
 
             Show-KeyValueSummaryTable -Heading 'Setup review' -Values ([ordered]@{
                 'Azure DevOps project' = $selectedProject.Name
@@ -3881,7 +3910,7 @@ Invoke-SetupWizard -Title 'Azure DevOps ALM4Dataverse setup' -Steps @(
                 'Shared repository'    = $sharedRepoName
                 'Publish mode'         = $(if ($repoPublishPlan.Mode -eq 'PullRequest') { "Pull request into $($repoPublishPlan.TargetBranch) from $($repoPublishPlan.BranchName)" } else { "Direct commit to $($repoPublishPlan.BranchName)" })
                 'Extension mode'       = $(if ($script:useAlm4DataverseExtension) { 'ALM4Dataverse extension enabled' } else { 'ALM4Dataverse extension disabled' })
-                'Solutions selected'   = [string]$solutions.Count
+                'Solutions selected'   = [string]$wizardState.Solutions.Count
             })
 
             Show-EnvironmentConfigurationTable -EnvironmentConfigurations $allConfiguredEnvironments
@@ -3889,6 +3918,13 @@ Invoke-SetupWizard -Title 'Azure DevOps ALM4Dataverse setup' -Steps @(
         }
     }
 )
+
+$solutionData = $wizardState.SolutionData
+$solutions = @($wizardState.Solutions)
+$devEnvUrl = $wizardState.DevEnvUrl
+$devEnvFriendlyName = $wizardState.DevEnvFriendlyName
+$devEnvironmentConfiguration = $wizardState.DevEnvironmentConfiguration
+$environments = @($wizardState.Environments)
 
 $allConfiguredEnvironments = @()
 if ($devEnvironmentConfiguration) {
@@ -3988,22 +4024,18 @@ Show-SetupCompletionScreen `
     -Heading 'Azure DevOps setup completed successfully!' `
     -AccessLabel 'Open your Azure DevOps project' `
     -AccessUrl "https://dev.azure.com/$orgName/$($selectedProject.Name)/_build" `
-    -MetricCards @(
-        @{ Label = 'Solutions'; AccentColor = 'green3_1'; Value = [string]$solutions.Count; Detail = 'Configured in alm-config.psd1' },
-        @{ Label = 'Environments'; AccentColor = 'yellow3'; Value = [string]$allConfiguredEnvironments.Count; Detail = 'Configured in Azure DevOps' },
-        @{ Label = 'Publish mode'; AccentColor = 'deepskyblue1'; Value = $(if ($repoPublishResult -and $repoPublishResult.Mode -eq 'PullRequest') { 'Pull request' } elseif ($repoPublishResult -and $repoPublishResult.HasChanges) { 'Direct commit' } else { 'No changes' }); Detail = $(if ($repoPublishResult) { $repoPublishResult.BranchName } else { 'Repository already up to date' }) }
-    ) `
     -SummaryValues ([ordered]@{
         'Azure DevOps project' = $selectedProject.Name
         'Main repository'      = $mainRepo.Name
         'Shared repository'    = $sharedRepoName
-        'Publish mode'         = $(if ($repoPublishResult -and $repoPublishResult.Mode -eq 'PullRequest') { "Pull request from $($repoPublishResult.BranchName) to $($repoPublishResult.TargetBranch)" } elseif ($repoPublishResult -and $repoPublishResult.HasChanges) { "Direct commit to $($repoPublishResult.BranchName)" } else { 'No repository changes were needed' })
+        'Publish mode'         = $(if ($repoPublishResult -and $repoPublishResult.Mode -eq 'PullRequest' -and $repoPublishResult.HasChanges) { "Pull request from $($repoPublishResult.BranchName) to $($repoPublishResult.TargetBranch) (merge required)" } elseif ($repoPublishResult -and $repoPublishResult.Mode -eq 'PullRequest') { 'Pull request mode selected, but no repository changes were detected so no branch or pull request was created' } elseif ($repoPublishResult -and $repoPublishResult.HasChanges) { "Direct commit to $($repoPublishResult.BranchName)" } else { 'No repository changes were needed' })
         'Configured environments' = [string]$allConfiguredEnvironments.Count
     }) `
     -NextStepLinks @(
-        (Get-Alm4DataverseDocUrl -RelativePath 'docs/setup/azdo-automated-setup.md' -Ref $ALM4DataverseRef),
-        (Get-Alm4DataverseDocUrl -RelativePath 'docs/config/azdo-environment-variable-group.md' -Ref $ALM4DataverseRef)
-    ) `
-    -Notes @(
-        $(if ($repoPublishResult -and $repoPublishResult.Mode -eq 'PullRequest' -and -not [string]::IsNullOrWhiteSpace($repoPublishResult.PullRequestUrl)) { "A pull request was opened: $($repoPublishResult.PullRequestUrl)" } elseif ($repoPublishResult -and $repoPublishResult.HasChanges) { "Repository changes were committed directly to '$($repoPublishResult.BranchName)'." } else { 'The repository already contained the generated files, so nothing new had to be committed.' })
+        $(if ($repoPublishResult -and $repoPublishResult.Mode -eq 'PullRequest' -and -not [string]::IsNullOrWhiteSpace($repoPublishResult.PullRequestUrl)) {
+            @{ Label = 'Review and merge the setup pull request (required before pipelines are active)'; Url = $repoPublishResult.PullRequestUrl }
+        }),
+        @{ Label = 'Run EXPORT for your DEV environment'; Url = (Get-Alm4DataverseDocUrl -RelativePath 'docs/usage/exporting-changes.md' -Ref $ALM4DataverseRef) },
+        @{ Label = 'Configure EV and CR values for environments'; Url = (Get-Alm4DataverseDocUrl -RelativePath 'docs/config/azdo-environment-variable-group.md' -Ref $ALM4DataverseRef) },
+        @{ Label = 'Run DEPLOY to promote the build'; Url = (Get-Alm4DataverseDocUrl -RelativePath 'docs/usage/deploying.md' -Ref $ALM4DataverseRef) }
     )

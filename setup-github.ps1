@@ -848,10 +848,16 @@ function Resolve-GitTargetRefFromRemote {
     [CmdletBinding()]
     param(
         [Parameter(Mandatory)][string]$RemoteName,
-        [Parameter(Mandatory)][string]$Ref
+        [Parameter(Mandatory)][string]$Ref,
+        [Parameter()][string]$RepositoryPath
     )
 
-    & git ls-remote --exit-code $RemoteName $Ref | Out-Null
+    $gitArgs = @()
+    if (-not [string]::IsNullOrWhiteSpace($RepositoryPath)) {
+        $gitArgs += @('-C', $RepositoryPath)
+    }
+
+    & git @gitArgs ls-remote --exit-code $RemoteName $Ref | Out-Null
     if ($LASTEXITCODE -eq 2) {
         throw "Could not resolve reference '$Ref' from remote '$RemoteName'."
     }
@@ -859,7 +865,7 @@ function Resolve-GitTargetRefFromRemote {
         throw "git ls-remote failed for '$RemoteName' with exit code $LASTEXITCODE"
     }
 
-    $lsRemoteOutput = (& git ls-remote $RemoteName $Ref | Select-Object -First 1)
+    $lsRemoteOutput = (& git @gitArgs ls-remote $RemoteName $Ref | Select-Object -First 1)
     if (-not $lsRemoteOutput) {
         throw "Could not resolve reference '$Ref' from remote '$RemoteName'."
     }
@@ -880,6 +886,86 @@ function Resolve-GitTargetRefFromRemote {
     }
 
     return $Ref
+}
+
+function Get-GitHubForkSyncState {
+    <#
+    .SYNOPSIS
+        Clones a GitHub shared workflow repository into a temporary working tree and computes its sync state against upstream.
+    #>
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory)][string]$ForkFullName,
+        [Parameter(Mandatory)][string]$WorkRoot,
+        [Parameter(Mandatory)][string]$UpstreamGitSource,
+        [Parameter(Mandatory)][string]$UpstreamFullName,
+        [Parameter(Mandatory)][string]$Reference,
+        [Parameter(Mandatory)][string]$DefaultBranch
+    )
+
+    & gh repo clone $ForkFullName $WorkRoot 2>&1 | Out-Null
+    if ($LASTEXITCODE -ne 0) {
+        throw "Failed to clone repository '$ForkFullName'."
+    }
+
+    & git -C $WorkRoot checkout $DefaultBranch 2>&1 | Out-Null
+    if ($LASTEXITCODE -ne 0) {
+        & git -C $WorkRoot checkout -b $DefaultBranch "origin/$DefaultBranch" 2>&1 | Out-Null
+        if ($LASTEXITCODE -ne 0) {
+            throw "Failed to check out repository default branch '$DefaultBranch'."
+        }
+    }
+
+    & git -C $WorkRoot remote remove upstream 2>$null | Out-Null
+    & git -C $WorkRoot remote add upstream $UpstreamGitSource 2>&1 | Out-Null
+    if ($LASTEXITCODE -ne 0) {
+        throw "Failed to add upstream remote '$UpstreamGitSource'."
+    }
+
+    & git -C $WorkRoot fetch upstream 2>&1 | Out-Null
+    if ($LASTEXITCODE -ne 0) {
+        throw 'Failed to fetch upstream remote.'
+    }
+
+    $upstreamRef = Resolve-GitTargetRefFromRemote -RemoteName 'upstream' -Ref $Reference -RepositoryPath $WorkRoot
+
+    $localHash = (& git -C $WorkRoot rev-parse HEAD).Trim()
+    $upstreamHash = (& git -C $WorkRoot rev-parse $upstreamRef).Trim()
+    $matchesCanonicalUpstreamDefault = $false
+
+    $canonicalUpstreamSource = Resolve-UpstreamGitRemoteSource -ConfiguredSource $UpstreamFullName -GitHubFullName $UpstreamFullName
+    if (-not [string]::IsNullOrWhiteSpace($canonicalUpstreamSource)) {
+        & git -C $WorkRoot remote remove upstream-github 2>$null | Out-Null
+        & git -C $WorkRoot remote add upstream-github $canonicalUpstreamSource 2>&1 | Out-Null
+        if ($LASTEXITCODE -eq 0) {
+            & git -C $WorkRoot fetch upstream-github $DefaultBranch 2>&1 | Out-Null
+            if ($LASTEXITCODE -eq 0) {
+                $canonicalUpstreamHash = (& git -C $WorkRoot rev-parse "upstream-github/$DefaultBranch").Trim()
+                $matchesCanonicalUpstreamDefault = ($localHash -eq $canonicalUpstreamHash)
+            }
+        }
+    }
+
+    $canFastForward = $false
+    $isAhead = $false
+    if ($localHash -ne $upstreamHash) {
+        & git -C $WorkRoot merge-base --is-ancestor HEAD $upstreamRef
+        $canFastForward = ($LASTEXITCODE -eq 0)
+
+        if (-not $canFastForward) {
+            & git -C $WorkRoot merge-base --is-ancestor $upstreamRef HEAD
+            $isAhead = ($LASTEXITCODE -eq 0)
+        }
+    }
+
+    return [pscustomobject]@{
+        UpstreamRef                     = $upstreamRef
+        LocalHash                       = $localHash
+        UpstreamHash                    = $upstreamHash
+        MatchesCanonicalUpstreamDefault = $matchesCanonicalUpstreamDefault
+        CanFastForward                  = $canFastForward
+        IsAhead                         = $isAhead
+    }
 }
 
 function Get-GitHubForksOfRepositoryForOwner {
@@ -957,7 +1043,7 @@ function Get-GitHubForksOfRepositoryForOwner {
 function Ensure-GitHubForkForSharedWorkflows {
     <#
     .SYNOPSIS
-        Ensures the user has a fork of the ALM4Dataverse shared workflow repository and optionally updates it from upstream.
+        Ensures the user has a shared workflow repository and optionally updates it from upstream.
     #>
     [CmdletBinding()]
     param(
@@ -1026,193 +1112,176 @@ function Ensure-GitHubForkForSharedWorkflows {
         throw "No shared workflow repository selected."
     }
 
-    $selectedForkFullName = $null
-    $createdNewFork = $false
+    $selectedSharedRepositoryFullName = $null
+    $createdNewSharedRepository = $false
     $selectedAction = $menuActions[$selection]
     if ($selectedAction.Type -eq 'UseExisting') {
-        $selectedForkFullName = $selectedAction.FullName
+        $selectedSharedRepositoryFullName = $selectedAction.FullName
     }
 
-    if (-not $selectedForkFullName) {
+    if (-not $selectedSharedRepositoryFullName) {
         $upstreamParts = $UpstreamFullName.Split('/', 2)
-        $defaultForkName = $upstreamParts[1]
+        $defaultRepositoryName = $upstreamParts[1]
         if (-not [string]::IsNullOrWhiteSpace($PreferredRepositoryFullName) -and $PreferredRepositoryFullName -match '^[^/]+/(.+)$') {
-            $defaultForkName = $Matches[1]
+            $defaultRepositoryName = $Matches[1]
         }
 
         while ($true) {
-            $forkName = Read-TextWithDefault -Prompt 'Fork repository name' -DefaultValue $defaultForkName
+            $repositoryName = Read-TextWithDefault -Prompt 'Shared workflow repository name' -DefaultValue $defaultRepositoryName
 
-            if ($forkName -match '^[A-Za-z0-9._-]+$') {
+            if ($repositoryName -match '^[A-Za-z0-9._-]+$') {
                 break
             }
 
             Write-Warning "Repository name contains invalid characters. Use letters, numbers, dot (.), underscore (_), or hyphen (-)."
         }
 
-        $selectedForkFullName = "$ForkOwner/$forkName"
-        Write-Host "Creating fork '$selectedForkFullName' from '$UpstreamFullName'..." -ForegroundColor Yellow
+        $selectedSharedRepositoryFullName = "$ForkOwner/$repositoryName"
 
-        $createArgs = @('repo', 'fork', $UpstreamFullName, '--clone=false', '--fork-name', $forkName)
-        $createResult = & gh @createArgs 2>&1
-        if ($LASTEXITCODE -ne 0) {
-            $errText = $createResult -join "`n"
-            if ($errText -match 'already exists') {
-                Write-Host "Repository '$selectedForkFullName' already exists; continuing." -ForegroundColor Yellow
-            }
-            else {
-                throw "Failed to create fork '$selectedForkFullName': $errText"
+        $creationModeItems = @(
+            'Public (fork)',
+            'Private'
+        )
+        $creationModeSelection = Select-FromMenu -Title "How should '$selectedSharedRepositoryFullName' be created?" -Items $creationModeItems
+        if ($null -eq $creationModeSelection) {
+            throw 'No shared workflow repository type selected.'
+        }
+
+        if ($creationModeSelection -eq 0) {
+            $createResult = Invoke-WithSpectreStatus -Status "Creating public fork '$selectedSharedRepositoryFullName' from '$UpstreamFullName'..." -ScriptBlock {
+                $createArgs = @('repo', 'fork', $UpstreamFullName, '--clone=false', '--fork-name', $repositoryName)
+                $createOutput = @(& gh @createArgs 2>&1)
+                return [pscustomobject]@{
+                    ExitCode = $LASTEXITCODE
+                    Output   = $createOutput
+                }
             }
         }
         else {
-            $createdNewFork = $true
+            $createResult = Invoke-WithSpectreStatus -Status "Creating private shared workflow repository '$selectedSharedRepositoryFullName'..." -ScriptBlock {
+                $createArgs = @('repo', 'create', $selectedSharedRepositoryFullName, '--private', '--add-readme')
+                $createOutput = @(& gh @createArgs 2>&1)
+                return [pscustomobject]@{
+                    ExitCode = $LASTEXITCODE
+                    Output   = $createOutput
+                }
+            }
+        }
+
+        if ($createResult.ExitCode -ne 0) {
+            $errText = @($createResult.Output) -join "`n"
+            if ($errText -match 'already exists') {
+                Write-Host "Repository '$selectedSharedRepositoryFullName' already exists; continuing." -ForegroundColor Yellow
+            }
+            else {
+                throw "Failed to create shared workflow repository '$selectedSharedRepositoryFullName': $errText"
+            }
+        }
+        else {
+            $createdNewSharedRepository = $true
         }
     }
 
-    $forkParts = $selectedForkFullName.Split('/', 2)
-    $forkOwnerName = $forkParts[0]
-    $forkRepoName = $forkParts[1]
-    $forkRepo = Invoke-WithSpectreStatus -Status "Loading repository details for '$selectedForkFullName'..." -ScriptBlock {
-        Get-GitHubRepo -Owner $forkOwnerName -Repo $forkRepoName
+    $sharedRepoParts = $selectedSharedRepositoryFullName.Split('/', 2)
+    $sharedRepoOwnerName = $sharedRepoParts[0]
+    $sharedRepoName = $sharedRepoParts[1]
+    $sharedRepo = Invoke-WithSpectreStatus -Status "Loading repository details for '$selectedSharedRepositoryFullName'..." -ScriptBlock {
+        Get-GitHubRepo -Owner $sharedRepoOwnerName -Repo $sharedRepoName
     }
 
     $defaultBranch = 'main'
-    if ($forkRepo.defaultBranchRef -and $forkRepo.defaultBranchRef.name) {
-        $defaultBranch = $forkRepo.defaultBranchRef.name
+    if ($sharedRepo.defaultBranchRef -and $sharedRepo.defaultBranchRef.name) {
+        $defaultBranch = $sharedRepo.defaultBranchRef.name
     }
 
     $workParent = Join-Path $env:TEMP ("ALM4Dataverse-ForkSync-" + [guid]::NewGuid().ToString('n'))
     $workRoot = Join-Path $workParent 'repo'
     New-DirectoryIfMissing -Path $workParent
 
-    $didPushLocation = $false
     try {
-        Write-Host "Checking fork '$selectedForkFullName' against upstream '$UpstreamFullName'..." -ForegroundColor DarkGray
-
-        & gh repo clone $selectedForkFullName $workRoot 2>&1 | Out-Host
-        if ($LASTEXITCODE -ne 0) {
-            throw "Failed to clone fork '$selectedForkFullName'."
+        $forkSyncState = Invoke-WithSpectreStatus -Status "Checking shared workflow repository '$selectedSharedRepositoryFullName' against upstream '$UpstreamFullName'..." -ScriptBlock {
+            Get-GitHubForkSyncState `
+                -ForkFullName $selectedSharedRepositoryFullName `
+                -WorkRoot $workRoot `
+                -UpstreamGitSource $UpstreamGitSource `
+                -UpstreamFullName $UpstreamFullName `
+                -Reference $Reference `
+                -DefaultBranch $defaultBranch
         }
 
-        Push-Location $workRoot
-        $didPushLocation = $true
-
-        & git checkout $defaultBranch 2>&1 | Out-Null
-        if ($LASTEXITCODE -ne 0) {
-            & git checkout -b $defaultBranch "origin/$defaultBranch" 2>&1 | Out-Null
-            if ($LASTEXITCODE -ne 0) {
-                throw "Failed to check out fork default branch '$defaultBranch'."
-            }
-        }
-
-        # Reset upstream remote to the configured source
-        & git remote remove upstream 2>$null | Out-Null
-        & git remote add upstream $UpstreamGitSource 2>&1 | Out-Null
-        if ($LASTEXITCODE -ne 0) {
-            throw "Failed to add upstream remote '$UpstreamGitSource'."
-        }
-
-        & git fetch upstream 2>&1 | Out-Null
-        if ($LASTEXITCODE -ne 0) {
-            throw "Failed to fetch upstream remote."
-        }
-
-        $upstreamRef = Resolve-GitTargetRefFromRemote -RemoteName 'upstream' -Ref $Reference
-
-        $localHash = (& git rev-parse HEAD).Trim()
-        $upstreamHash = (& git rev-parse $upstreamRef).Trim()
-        $matchesCanonicalUpstreamDefault = $false
-
-        $canonicalUpstreamSource = Resolve-UpstreamGitRemoteSource -ConfiguredSource $UpstreamFullName -GitHubFullName $UpstreamFullName
-        if (-not [string]::IsNullOrWhiteSpace($canonicalUpstreamSource)) {
-            & git remote remove upstream-github 2>$null | Out-Null
-            & git remote add upstream-github $canonicalUpstreamSource 2>&1 | Out-Null
-            if ($LASTEXITCODE -eq 0) {
-                & git fetch upstream-github $defaultBranch 2>&1 | Out-Null
-                if ($LASTEXITCODE -eq 0) {
-                    $canonicalUpstreamHash = (& git rev-parse "upstream-github/$defaultBranch").Trim()
-                    $matchesCanonicalUpstreamDefault = ($localHash -eq $canonicalUpstreamHash)
-                }
-            }
-        }
-
-        if ($localHash -eq $upstreamHash) {
-            Write-Host "Fork is already up to date for ref '$Reference'."
+        if ($forkSyncState.LocalHash -eq $forkSyncState.UpstreamHash) {
+            Write-Host "Shared workflow repository is already up to date for ref '$Reference'."
         }
         else {
-            if ($createdNewFork -or $matchesCanonicalUpstreamDefault) {
-                Write-Host "Fresh fork detected. Aligning '$selectedForkFullName' '$defaultBranch' to ref '$Reference'..." -ForegroundColor Yellow
+            if ($createdNewSharedRepository -or $forkSyncState.MatchesCanonicalUpstreamDefault) {
+                Invoke-WithErrorHandling -OperationName "Aligning shared workflow repository '$selectedSharedRepositoryFullName'" -StatusMessage "Aligning shared workflow repository '$selectedSharedRepositoryFullName' to ref '$Reference'..." -CaptureOutputInPanel -ScriptBlock {
+                    & git -C $workRoot reset --hard $forkSyncState.UpstreamRef 2>&1 | Out-Host
+                    if ($LASTEXITCODE -ne 0) {
+                        throw "Failed to align shared workflow repository '$selectedSharedRepositoryFullName' to ref '$Reference'."
+                    }
 
-                & git reset --hard $upstreamRef 2>&1 | Out-Host
-                if ($LASTEXITCODE -ne 0) {
-                    throw "Failed to align new fork '$selectedForkFullName' to ref '$Reference'."
-                }
+                    & git -C $workRoot push --force-with-lease origin $defaultBranch 2>&1 | Out-Host
+                    if ($LASTEXITCODE -ne 0) { throw 'Git push failed.' }
+                } | Out-Null
 
-                & git push --force-with-lease origin $defaultBranch 2>&1 | Out-Host
-                if ($LASTEXITCODE -ne 0) { throw "Git push failed." }
-
-                Write-Host "Fork aligned successfully."
-                return Get-GitHubRepo -Owner $forkOwnerName -Repo $forkRepoName
+                Write-Host "Shared workflow repository aligned successfully."
+                return Get-GitHubRepo -Owner $sharedRepoOwnerName -Repo $sharedRepoName
             }
 
-            & git merge-base --is-ancestor HEAD $upstreamRef
-            $canFastForward = ($LASTEXITCODE -eq 0)
+            if ($forkSyncState.CanFastForward) {
+                if (Read-YesNo -Prompt "Updates are available from upstream (fast-forward). Update '$selectedSharedRepositoryFullName'?" ) {
+                    Invoke-WithErrorHandling -OperationName "Fast-forwarding shared workflow repository '$selectedSharedRepositoryFullName'" -StatusMessage "Fast-forwarding shared workflow repository '$selectedSharedRepositoryFullName'..." -CaptureOutputInPanel -ScriptBlock {
+                        & git -C $workRoot merge --ff-only $forkSyncState.UpstreamRef 2>&1 | Out-Host
+                        if ($LASTEXITCODE -ne 0) { throw 'Git merge failed.' }
 
-            if ($canFastForward) {
-                if (Read-YesNo -Prompt "Updates are available from upstream (fast-forward). Update '$selectedForkFullName'?" ) {
-                    Write-Host "Fast-forwarding fork..." -ForegroundColor Yellow
-                    & git merge --ff-only $upstreamRef 2>&1 | Out-Host
-                    if ($LASTEXITCODE -ne 0) { throw "Git merge failed." }
+                        & git -C $workRoot push origin $defaultBranch 2>&1 | Out-Host
+                        if ($LASTEXITCODE -ne 0) { throw 'Git push failed.' }
+                    } | Out-Null
 
-                    & git push origin $defaultBranch 2>&1 | Out-Host
-                    if ($LASTEXITCODE -ne 0) { throw "Git push failed." }
-
-                    Write-Host "Fork updated successfully."
+                    Write-Host "Shared workflow repository updated successfully."
                 }
             }
             else {
-                & git merge-base --is-ancestor $upstreamRef HEAD
-                $isAhead = ($LASTEXITCODE -eq 0)
-
-                if ($isAhead) {
-                    Write-Host "Fork is ahead of upstream for ref '$Reference'." -ForegroundColor Yellow
+                if ($forkSyncState.IsAhead) {
+                    Write-Host "Shared workflow repository is ahead of upstream for ref '$Reference'." -ForegroundColor Yellow
                 }
                 else {
                     $divergedMenuItems = @(
-                        "Rebase '$selectedForkFullName' onto ref '$Reference'",
-                        "Reset '$selectedForkFullName' '$defaultBranch' to ref '$Reference' (force push)",
-                        "Leave '$selectedForkFullName' unchanged"
+                        "Rebase '$selectedSharedRepositoryFullName' onto ref '$Reference'",
+                        "Reset '$selectedSharedRepositoryFullName' '$defaultBranch' to ref '$Reference' (force push)",
+                        "Leave '$selectedSharedRepositoryFullName' unchanged"
                     )
-                    $divergedSelection = Select-FromMenu -Title "Fork '$selectedForkFullName' has diverged from upstream. Choose how to update it." -Items $divergedMenuItems
+                    $divergedSelection = Select-FromMenu -Title "Shared workflow repository '$selectedSharedRepositoryFullName' has diverged from upstream. Choose how to update it." -Items $divergedMenuItems
 
                     switch ($divergedSelection) {
                         0 {
-                            Write-Host "Rebasing fork onto upstream ref..." -ForegroundColor Yellow
-                            & git rebase $upstreamRef 2>&1 | Out-Host
-                            if ($LASTEXITCODE -ne 0) {
-                                throw "Git rebase failed - resolve conflicts manually in '$selectedForkFullName'."
-                            }
+                            Invoke-WithErrorHandling -OperationName "Rebasing shared workflow repository '$selectedSharedRepositoryFullName'" -StatusMessage "Rebasing shared workflow repository '$selectedSharedRepositoryFullName' onto '$Reference'..." -CaptureOutputInPanel -ScriptBlock {
+                                & git -C $workRoot rebase $forkSyncState.UpstreamRef 2>&1 | Out-Host
+                                if ($LASTEXITCODE -ne 0) {
+                                    throw "Git rebase failed - resolve conflicts manually in '$selectedSharedRepositoryFullName'."
+                                }
 
-                            Write-Host "Pushing rebased branch (force-with-lease)..." -ForegroundColor Yellow
-                            & git push --force-with-lease origin $defaultBranch 2>&1 | Out-Host
-                            if ($LASTEXITCODE -ne 0) { throw "Git push failed." }
+                                & git -C $workRoot push --force-with-lease origin $defaultBranch 2>&1 | Out-Host
+                                if ($LASTEXITCODE -ne 0) { throw 'Git push failed.' }
+                            } | Out-Null
 
-                            Write-Host "Fork updated successfully."
+                            Write-Host "Shared workflow repository updated successfully."
                         }
                         1 {
-                            Write-Host "Resetting fork to ref '$Reference' and force pushing..." -ForegroundColor Yellow
-                            & git reset --hard $upstreamRef 2>&1 | Out-Host
-                            if ($LASTEXITCODE -ne 0) {
-                                throw "Failed to reset fork '$selectedForkFullName' to ref '$Reference'."
-                            }
+                            Invoke-WithErrorHandling -OperationName "Resetting shared workflow repository '$selectedSharedRepositoryFullName'" -StatusMessage "Resetting shared workflow repository '$selectedSharedRepositoryFullName' to '$Reference'..." -CaptureOutputInPanel -ScriptBlock {
+                                & git -C $workRoot reset --hard $forkSyncState.UpstreamRef 2>&1 | Out-Host
+                                if ($LASTEXITCODE -ne 0) {
+                                    throw "Failed to reset shared workflow repository '$selectedSharedRepositoryFullName' to ref '$Reference'."
+                                }
 
-                            & git push --force-with-lease origin $defaultBranch 2>&1 | Out-Host
-                            if ($LASTEXITCODE -ne 0) { throw "Git push failed." }
+                                & git -C $workRoot push --force-with-lease origin $defaultBranch 2>&1 | Out-Host
+                                if ($LASTEXITCODE -ne 0) { throw 'Git push failed.' }
+                            } | Out-Null
 
-                            Write-Host "Fork updated successfully."
+                            Write-Host "Shared workflow repository updated successfully."
                         }
                         default {
-                            Write-Host "Leaving fork unchanged." -ForegroundColor Yellow
+                            Write-Host "Leaving shared workflow repository unchanged." -ForegroundColor Yellow
                         }
                     }
                 }
@@ -1220,13 +1289,10 @@ function Ensure-GitHubForkForSharedWorkflows {
         }
     }
     finally {
-        if ($didPushLocation) {
-            Pop-Location
-        }
         try { Remove-Item -LiteralPath $workParent -Recurse -Force -ErrorAction SilentlyContinue } catch { }
     }
 
-    return Get-GitHubRepo -Owner $forkOwnerName -Repo $forkRepoName
+    return Get-GitHubRepo -Owner $sharedRepoOwnerName -Repo $sharedRepoName
 }
 
 function New-GitHubRepositoryInteractive {
@@ -1269,15 +1335,23 @@ function New-GitHubRepositoryInteractive {
     $visibilityFlag = if ($visibilitySelection -eq 0) { '--private' } else { '--public' }
     $repoFullName = "$owner/$repoName"
 
-    Write-Host "Creating repository '$repoFullName'..." -ForegroundColor Yellow
-    $createArgs = @('repo', 'create', $repoFullName, $visibilityFlag, '--add-readme')
-    $result = & gh @createArgs 2>&1
-    if ($LASTEXITCODE -ne 0) {
-        throw "Failed to create repository '$repoFullName': $($result -join "`n")"
+    $createResult = Invoke-WithSpectreStatus -Status "Creating repository '$repoFullName'..." -ScriptBlock {
+        $createArgs = @('repo', 'create', $repoFullName, $visibilityFlag, '--add-readme')
+        $output = @(& gh @createArgs 2>&1)
+        return [pscustomobject]@{
+            ExitCode = $LASTEXITCODE
+            Output   = $output
+        }
+    }
+
+    if ($createResult.ExitCode -ne 0) {
+        throw "Failed to create repository '$repoFullName': $(@($createResult.Output) -join "`n")"
     }
 
     Write-Host "Created repository '$repoFullName'." -ForegroundColor Green
-    return Get-GitHubRepo -Owner $owner -Repo $repoName
+    return Invoke-WithSpectreStatus -Status "Loading repository details for '$repoFullName'..." -ScriptBlock {
+        Get-GitHubRepo -Owner $owner -Repo $repoName
+    }
 }
 
 #endregion
@@ -1957,12 +2031,19 @@ function Get-DataverseSolutionsSelection {
     ) -DocRelativePath 'docs/config/alm-config.md' -Ref $ALM4DataverseRef
 
     $existingEnvironmentSummary = Get-GitHubExistingEnvironmentSelectionSummary -ExistingEnvironment $ExistingEnvironmentConfiguration
-    $selectedEnv = Select-DataverseEnvironment -Prompt "Select your DEV environment" -PreferredUrl $ExistingEnvironmentUrl -PreferredSelectionSummary $existingEnvironmentSummary -KeepPreferredInList
+    $selectedEnv = Select-DataverseEnvironment -Prompt "Select your DEV environment" -PreferredUrl $ExistingEnvironmentUrl -PreferredSelectionSummary $existingEnvironmentSummary
     if (-not $selectedEnv) { throw "No environment selected." }
 
-    $reuseExistingConfiguration = ($selectedEnv.PSObject.Properties.Name -contains 'UseExistingConfiguration' -and $selectedEnv.UseExistingConfiguration)
-
     $devEnvUrl = ConvertTo-NormalizedEnvironmentUrl -Url $selectedEnv.Endpoints["WebApplication"]
+    $normalizedExistingEnvironmentUrl = ConvertTo-NormalizedEnvironmentUrl -Url $ExistingEnvironmentUrl
+    $reuseExistingConfiguration = (
+        ($selectedEnv.PSObject.Properties.Name -contains 'UseExistingConfiguration' -and $selectedEnv.UseExistingConfiguration) -or
+        (
+            -not [string]::IsNullOrWhiteSpace($normalizedExistingEnvironmentUrl) -and
+            $devEnvUrl -ieq $normalizedExistingEnvironmentUrl
+        )
+    )
+
     Write-Host "Selected: $($selectedEnv.FriendlyName) ($devEnvUrl)" -ForegroundColor Cyan
 
     $connection = Invoke-WithSpectreStatus -Status 'Connecting to the selected DEV environment...' -ScriptBlock {
@@ -1991,7 +2072,7 @@ function Get-DataverseSolutionsSelection {
     
     if (-not $allSolutions -or $allSolutions.Count -eq 0) {
         Write-Host "No unmanaged solutions found in the environment." -ForegroundColor Yellow
-        return @{ Solutions = @(); EnvironmentUrl = $devEnvUrl; ReuseExistingConfiguration = $reuseExistingConfiguration }
+        return [pscustomobject]@{ Solutions = @(); EnvironmentUrl = $devEnvUrl; ReuseExistingConfiguration = $reuseExistingConfiguration }
     }
     
     $userSolutions = @($allSolutions | Where-Object { 
@@ -2001,7 +2082,7 @@ function Get-DataverseSolutionsSelection {
     
     if ($userSolutions.Count -eq 0) {
         Write-Host "No user-created solutions found." -ForegroundColor Yellow
-        return @{ Solutions = @(); EnvironmentUrl = $devEnvUrl; ReuseExistingConfiguration = $reuseExistingConfiguration }
+        return [pscustomobject]@{ Solutions = @(); EnvironmentUrl = $devEnvUrl; ReuseExistingConfiguration = $reuseExistingConfiguration }
     }
 
     # Pre-populate from existing alm-config.psd1 if available
@@ -2031,7 +2112,7 @@ function Get-DataverseSolutionsSelection {
         $configSolutions += @{ name = $sol.uniquename; deployUnmanaged = $false }
     }
     
-    return @{ Solutions = $configSolutions; EnvironmentUrl = $devEnvUrl; EnvironmentFriendlyName = $selectedEnv.FriendlyName; ReuseExistingConfiguration = $reuseExistingConfiguration }
+    return [pscustomobject]@{ Solutions = $configSolutions; EnvironmentUrl = $devEnvUrl; EnvironmentFriendlyName = $selectedEnv.FriendlyName; ReuseExistingConfiguration = $reuseExistingConfiguration }
 }
 
 function Get-GitHubEnvironmentConfiguration {
@@ -2527,8 +2608,15 @@ function Publish-GitHubRepoChanges {
 Set-SetupPhaseContext -PhaseNames $script:setupPhaseNames -CurrentPhaseIndex 0
 Write-Section "Authenticating with GitHub"
 
-$ghStatus = & gh auth status --hostname github.com 2>&1
-$hasExistingGitHubLogin = ($LASTEXITCODE -eq 0)
+$ghStatusProbe = Invoke-WithSpectreStatus -Status 'Checking GitHub CLI authentication status...' -ScriptBlock {
+    $output = @(& gh auth status --hostname github.com 2>&1)
+    return [pscustomobject]@{
+        Output   = $output
+        ExitCode = $LASTEXITCODE
+    }
+}
+$ghStatus = @($ghStatusProbe.Output)
+$hasExistingGitHubLogin = ($ghStatusProbe.ExitCode -eq 0)
 
 if ($hasExistingGitHubLogin) {
     $existingGhUser = (& gh api user --jq '.login' 2>&1 | Out-String).Trim()
@@ -2729,6 +2817,37 @@ $existingSetupState = Invoke-WithSpectreStatus -Status 'Inspecting the existing 
         -TenantId $TenantId
 }
 
+$existingDevEnvironment = $existingSetupState.DevEnvironment
+$existingDevEnvironmentUrl = $null
+$existingDevEnvironmentCredentials = $null
+$existingDevEnvironmentServiceAccountUPN = $null
+
+if ($existingDevEnvironment) {
+    foreach ($urlPropertyName in @('Url', 'EnvironmentUrl', 'DataverseUrl', 'WebApplicationUrl')) {
+        if ($existingDevEnvironment.PSObject.Properties.Name -contains $urlPropertyName) {
+            $candidateUrl = ConvertTo-NormalizedEnvironmentUrl -Url $existingDevEnvironment.$urlPropertyName
+            if (-not [string]::IsNullOrWhiteSpace($candidateUrl)) {
+                $existingDevEnvironmentUrl = $candidateUrl
+                break
+            }
+        }
+    }
+
+    if ([string]::IsNullOrWhiteSpace($existingDevEnvironmentUrl) -and $existingDevEnvironment.PSObject.Properties.Name -contains 'Endpoints' -and $existingDevEnvironment.Endpoints) {
+        if ($existingDevEnvironment.Endpoints.ContainsKey('WebApplication')) {
+            $existingDevEnvironmentUrl = ConvertTo-NormalizedEnvironmentUrl -Url $existingDevEnvironment.Endpoints['WebApplication']
+        }
+    }
+
+    if ($existingDevEnvironment.PSObject.Properties.Name -contains 'Credentials') {
+        $existingDevEnvironmentCredentials = $existingDevEnvironment.Credentials
+    }
+
+    if ($existingDevEnvironment.PSObject.Properties.Name -contains 'ServiceAccountUPN') {
+        $existingDevEnvironmentServiceAccountUPN = $existingDevEnvironment.ServiceAccountUPN
+    }
+}
+
 if ($existingSetupState.SharedWorkflowRepository) {
     Write-Host "Existing shared workflow repository detected: $($existingSetupState.SharedWorkflowRepository)" -ForegroundColor DarkGray
 }
@@ -2739,7 +2858,7 @@ if ($existingSetupState.SharedWorkflowReference) {
 # ─────────────────────────────────────────────────────────────
 Write-Section "Ensuring Shared Workflow Repository"
 
-$sharedWorkflowRepo = Invoke-WithErrorHandling -OperationName "Ensuring shared workflow repository fork" -ScriptBlock {
+$sharedWorkflowRepo = Invoke-WithErrorHandling -OperationName "Ensuring shared workflow repository" -ScriptBlock {
     Ensure-GitHubForkForSharedWorkflows `
         -UpstreamFullName $upstreamWorkflowRepoFullName `
         -ForkOwner $script:ghUser `
@@ -2842,12 +2961,14 @@ $repoPublishPlan = Get-RepoChangePublishPlan `
     -DocRelativePath 'docs/setup/github-setup.md' `
     -Ref $ALM4DataverseRef
 
-$deploymentEnvironments = @()
-$solutionResult = $null
-$devEnvUrl = $null
-$devEnvFriendlyName = $null
-$reuseExistingDevEnvironmentConfiguration = $false
-$devEnvironmentConfiguration = $null
+$wizardState = [pscustomobject]@{
+    DeploymentEnvironments                  = @()
+    SolutionResult                          = $null
+    DevEnvUrl                               = $null
+    DevEnvFriendlyName                      = $null
+    ReuseExistingDevEnvironmentConfiguration = $false
+    DevEnvironmentConfiguration             = $null
+}
 $devEnvShortName = "Dev-$defaultBranch"
 $repoPublishResult = $null
 
@@ -2909,18 +3030,97 @@ try {
             Action = {
                 Write-Section 'Configure Solutions (alm-config.psd1)'
 
-                $solutionResult = Invoke-WithErrorHandling -OperationName 'Selecting solutions' -ScriptBlock {
+                $wizardState.SolutionResult = Invoke-WithErrorHandling -OperationName 'Selecting solutions' -ScriptBlock {
                     $existingConfigPath = Join-Path $cloneRoot 'alm-config.psd1'
-                    Get-DataverseSolutionsSelection -ExistingConfigPath $existingConfigPath -ExistingEnvironmentUrl $existingSetupState.DevEnvironment.Url -ExistingEnvironmentConfiguration $existingSetupState.DevEnvironment
+                    Get-DataverseSolutionsSelection -ExistingConfigPath $existingConfigPath -ExistingEnvironmentUrl $existingDevEnvironmentUrl -ExistingEnvironmentConfiguration $existingDevEnvironment
                 }
 
-                $devEnvUrl = if ($solutionResult) { $solutionResult.EnvironmentUrl } else { $null }
-                $devEnvFriendlyName = if ($solutionResult) { $solutionResult.EnvironmentFriendlyName } else { $null }
-                $reuseExistingDevEnvironmentConfiguration = if ($solutionResult) { [bool]$solutionResult.ReuseExistingConfiguration } else { $false }
+                $wizardState.DevEnvUrl = if ($wizardState.SolutionResult) { $wizardState.SolutionResult.EnvironmentUrl } else { $null }
+                $wizardState.DevEnvFriendlyName = if ($wizardState.SolutionResult) { $wizardState.SolutionResult.EnvironmentFriendlyName } else { $null }
+                $wizardState.ReuseExistingDevEnvironmentConfiguration = if ($wizardState.SolutionResult) { [bool]$wizardState.SolutionResult.ReuseExistingConfiguration } else { $false }
 
                 Invoke-WithErrorHandling -OperationName 'Updating alm-config.psd1' -StatusMessage 'Updating alm-config.psd1 with the selected solutions...' -ScriptBlock {
-                    Update-AlmConfigInRepoClone -Solutions @($solutionResult.Solutions) -RepoRoot $cloneRoot
+                    Update-AlmConfigInRepoClone -Solutions @($wizardState.SolutionResult.Solutions) -RepoRoot $cloneRoot
                 } -CaptureOutputInPanel | Out-Null
+            }
+        },
+        [pscustomobject]@{
+            Name = 'Configure DEV credentials'
+            Action = {
+                Write-Section 'Configure Dev Environment Credentials'
+
+                if ($useGitHubEnvironments) {
+                    Write-Host "Preparing GitHub environment '$devEnvShortName' for the DEV Dataverse environment." -ForegroundColor Green
+                }
+                else {
+                    Write-Host "Preparing prefixed repo-level credentials for DEV environment '$devEnvShortName'." -ForegroundColor Green
+                }
+                Write-Host ''
+
+                if (-not $wizardState.DevEnvUrl) {
+                    $existingDevEnvironmentSummary = Get-GitHubExistingEnvironmentSelectionSummary -ExistingEnvironment $existingDevEnvironment
+                    $devEnvSelection = Select-DataverseEnvironment -Prompt 'Select your DEV Dataverse environment' -PreferredUrl $existingDevEnvironmentUrl -PreferredSelectionSummary $existingDevEnvironmentSummary
+                    if ($devEnvSelection) {
+                        $wizardState.DevEnvUrl = ConvertTo-NormalizedEnvironmentUrl -Url $devEnvSelection.Endpoints['WebApplication']
+                        $wizardState.DevEnvFriendlyName = $devEnvSelection.FriendlyName
+                        $wizardState.ReuseExistingDevEnvironmentConfiguration = (
+                            ($devEnvSelection.PSObject.Properties.Name -contains 'UseExistingConfiguration' -and $devEnvSelection.UseExistingConfiguration) -or
+                            (
+                                -not [string]::IsNullOrWhiteSpace($existingDevEnvironmentUrl) -and
+                                $wizardState.DevEnvUrl -ieq $existingDevEnvironmentUrl
+                            )
+                        )
+                    }
+                }
+
+                if (-not $wizardState.DevEnvUrl) {
+                    [Spectre.Console.AnsiConsole]::MarkupLine('[yellow]No DEV environment is currently selected, so there is nothing to configure for this step yet.[/]')
+                    $wizardState.DevEnvironmentConfiguration = $null
+                    return
+                }
+
+                $canReuseExistingDevConfiguration = (
+                    $wizardState.ReuseExistingDevEnvironmentConfiguration -and
+                    $existingDevEnvironment -and
+                    $existingDevEnvironmentCredentials -and
+                    -not [string]::IsNullOrWhiteSpace($existingDevEnvironmentServiceAccountUPN)
+                )
+
+                if ($canReuseExistingDevConfiguration) {
+                    Write-Host 'Using the existing DEV environment credentials and service account you selected from the menu.' -ForegroundColor Green
+                    $wizardState.DevEnvironmentConfiguration = [pscustomobject]@{
+                        ShortName         = $devEnvShortName
+                        FriendlyName      = $(if ([string]::IsNullOrWhiteSpace($wizardState.DevEnvFriendlyName)) { $devEnvShortName } else { $wizardState.DevEnvFriendlyName })
+                        Url               = (ConvertTo-NormalizedEnvironmentUrl -Url $wizardState.DevEnvUrl)
+                        Credentials       = $existingDevEnvironmentCredentials
+                        ServiceAccountUPN = $existingDevEnvironmentServiceAccountUPN
+                    }
+                }
+                else {
+                    if ($wizardState.ReuseExistingDevEnvironmentConfiguration -and -not $canReuseExistingDevConfiguration) {
+                        Write-Warning 'The existing DEV environment entry is missing either credentials or service account information, so setup needs to ask for the missing details.'
+                    }
+
+                    $wizardState.DevEnvironmentConfiguration = Invoke-WithErrorHandling -OperationName 'Selecting DEV credentials' -ScriptBlock {
+                        Get-GitHubEnvironmentConfiguration `
+                            -EnvironmentName $devEnvShortName `
+                            -EnvironmentUrl $wizardState.DevEnvUrl `
+                            -FriendlyName $wizardState.DevEnvFriendlyName `
+                            -ExistingCredentials $script:cachedCredentials `
+                            -ExistingServiceAccounts $script:cachedServiceAccounts `
+                            -TenantId $TenantId `
+                            -RepoName $repoName `
+                            -ExistingCredential $existingDevEnvironmentCredentials `
+                            -ExistingServiceAccountUPN $existingDevEnvironmentServiceAccountUPN
+                    }
+                }
+
+                if ($wizardState.DevEnvironmentConfiguration -and -not ($script:cachedCredentials | Where-Object { $_.ApplicationId -eq $wizardState.DevEnvironmentConfiguration.Credentials.ApplicationId -and $_.TenantId -eq $wizardState.DevEnvironmentConfiguration.Credentials.TenantId })) {
+                    $script:cachedCredentials += $wizardState.DevEnvironmentConfiguration.Credentials
+                }
+                if ($wizardState.DevEnvironmentConfiguration -and $script:cachedServiceAccounts -notcontains $wizardState.DevEnvironmentConfiguration.ServiceAccountUPN) {
+                    $script:cachedServiceAccounts += $wizardState.DevEnvironmentConfiguration.ServiceAccountUPN
+                }
             }
         },
         [pscustomobject]@{
@@ -2935,7 +3135,7 @@ try {
                     }
 
                     $existingEnvironmentUrl = ConvertTo-NormalizedEnvironmentUrl -Url $existingDeploymentEnvironment.Url
-                    if ($existingEnvironmentUrl -and $existingEnvironmentUrl -ieq $devEnvUrl) {
+                    if ($existingEnvironmentUrl -and $existingEnvironmentUrl -ieq $wizardState.DevEnvUrl) {
                         Write-Warning "Skipping existing deployment stage '$($existingDeploymentEnvironment.ShortName)' because it points at the selected DEV environment URL."
                         continue
                     }
@@ -2950,7 +3150,7 @@ try {
                     }
                 }
 
-                $deploymentEnvironments = @(Invoke-WithErrorHandling -OperationName 'Selecting deployment environments' -ScriptBlock {
+                $wizardState.DeploymentEnvironments = @(Invoke-WithErrorHandling -OperationName 'Selecting deployment environments' -ScriptBlock {
                     Select-ConfiguredDeploymentEnvironments `
                         -InitialEnvironments $initialDeploymentEnvironments `
                         -Heading 'Target Deployment Environments' `
@@ -2965,7 +3165,7 @@ try {
                         -AddEnvironmentScriptBlock {
                             param($currentSelections)
 
-                            $selectedEnv = Select-DataverseEnvironment -Prompt 'Select a Dataverse environment for deployment' -ExcludeUrl $devEnvUrl
+                            $selectedEnv = Select-DataverseEnvironment -Prompt 'Select a Dataverse environment for deployment' -ExcludeUrl $wizardState.DevEnvUrl
                             if (-not $selectedEnv) {
                                 return $null
                             }
@@ -3019,7 +3219,7 @@ try {
                             }
 
                             $currentUrl = ConvertTo-NormalizedEnvironmentUrl -Url $environmentToEdit.Url
-                            $selectedEnv = Select-DataverseEnvironment -Prompt "Select the Dataverse environment for '$($environmentToEdit.ShortName)'" -ExcludeUrl $devEnvUrl -PreferredUrl $currentUrl
+                            $selectedEnv = Select-DataverseEnvironment -Prompt "Select the Dataverse environment for '$($environmentToEdit.ShortName)'" -ExcludeUrl $wizardState.DevEnvUrl -PreferredUrl $currentUrl
                             if (-not $selectedEnv) {
                                 return $null
                             }
@@ -3072,7 +3272,7 @@ try {
                 })
 
                 $resolvedDeploymentEnvironments = @()
-                foreach ($selectedDeploymentEnvironment in @($deploymentEnvironments)) {
+                foreach ($selectedDeploymentEnvironment in @($wizardState.DeploymentEnvironments)) {
                     if ([string]::IsNullOrWhiteSpace($selectedDeploymentEnvironment.ShortName)) {
                         continue
                     }
@@ -3081,7 +3281,7 @@ try {
                     $resolvedFriendlyName = if ([string]::IsNullOrWhiteSpace($selectedDeploymentEnvironment.FriendlyName)) { $selectedDeploymentEnvironment.ShortName } else { $selectedDeploymentEnvironment.FriendlyName }
 
                     if ([string]::IsNullOrWhiteSpace($resolvedEnvironmentUrl)) {
-                        $resolvedEnvironment = Select-DataverseEnvironment -Prompt "Resolve the Dataverse environment for existing deployment stage '$($selectedDeploymentEnvironment.ShortName)'" -ExcludeUrl $devEnvUrl -PreferredUrl $selectedDeploymentEnvironment.Url
+                        $resolvedEnvironment = Select-DataverseEnvironment -Prompt "Resolve the Dataverse environment for existing deployment stage '$($selectedDeploymentEnvironment.ShortName)'" -ExcludeUrl $wizardState.DevEnvUrl -PreferredUrl $selectedDeploymentEnvironment.Url
                         if (-not $resolvedEnvironment) {
                             throw "No Dataverse environment selected for existing deployment stage '$($selectedDeploymentEnvironment.ShortName)'."
                         }
@@ -3090,7 +3290,7 @@ try {
                         $resolvedFriendlyName = $resolvedEnvironment.FriendlyName
                     }
 
-                    if ($resolvedEnvironmentUrl -and $resolvedEnvironmentUrl -ieq $devEnvUrl) {
+                    if ($resolvedEnvironmentUrl -and $resolvedEnvironmentUrl -ieq $wizardState.DevEnvUrl) {
                         Write-Warning "Skipping deployment environment '$($selectedDeploymentEnvironment.ShortName)' because it points at the selected DEV environment URL."
                         continue
                     }
@@ -3133,90 +3333,17 @@ try {
                     }
                 }
 
-                $deploymentEnvironments = @($resolvedDeploymentEnvironments)
+                $wizardState.DeploymentEnvironments = @($resolvedDeploymentEnvironments)
 
                 Invoke-WithErrorHandling -OperationName 'Updating DEPLOY workflow' -StatusMessage 'Regenerating the DEPLOY workflow for the selected environments...' -ScriptBlock {
                     Update-DeployWorkflowInRepoClone `
                         -RepoRoot $cloneRoot `
                         -Branch $defaultBranch `
-                        -DeploymentEnvironments $deploymentEnvironments `
+                        -DeploymentEnvironments $wizardState.DeploymentEnvironments `
                         -SharedWorkflowRepository $sharedWorkflowRepository `
                         -SharedWorkflowRef $sharedWorkflowReference `
                         -PromotionMode $deploymentPromotionMode
                 } -CaptureOutputInPanel | Out-Null
-            }
-        },
-        [pscustomobject]@{
-            Name = 'Configure DEV credentials'
-            Action = {
-                Write-Section 'Configure Dev Environment Credentials'
-
-                if ($useGitHubEnvironments) {
-                    Write-Host "Preparing GitHub environment '$devEnvShortName' for the DEV Dataverse environment." -ForegroundColor Green
-                }
-                else {
-                    Write-Host "Preparing prefixed repo-level credentials for DEV environment '$devEnvShortName'." -ForegroundColor Green
-                }
-                Write-Host ''
-
-                if (-not $devEnvUrl) {
-                    $existingDevEnvironmentSummary = Get-GitHubExistingEnvironmentSelectionSummary -ExistingEnvironment $existingSetupState.DevEnvironment
-                    $devEnvSelection = Select-DataverseEnvironment -Prompt 'Select your DEV Dataverse environment' -PreferredUrl $existingSetupState.DevEnvironment.Url -PreferredSelectionSummary $existingDevEnvironmentSummary -KeepPreferredInList
-                    if ($devEnvSelection) {
-                        $devEnvUrl = ConvertTo-NormalizedEnvironmentUrl -Url $devEnvSelection.Endpoints['WebApplication']
-                        $devEnvFriendlyName = $devEnvSelection.FriendlyName
-                        $reuseExistingDevEnvironmentConfiguration = ($devEnvSelection.PSObject.Properties.Name -contains 'UseExistingConfiguration' -and $devEnvSelection.UseExistingConfiguration)
-                    }
-                }
-
-                if (-not $devEnvUrl) {
-                    [Spectre.Console.AnsiConsole]::MarkupLine('[yellow]No DEV environment is currently selected, so there is nothing to configure for this step yet.[/]')
-                    $devEnvironmentConfiguration = $null
-                    return
-                }
-
-                $canReuseExistingDevConfiguration = (
-                    $reuseExistingDevEnvironmentConfiguration -and
-                    $existingSetupState.DevEnvironment -and
-                    $existingSetupState.DevEnvironment.Credentials -and
-                    -not [string]::IsNullOrWhiteSpace($existingSetupState.DevEnvironment.ServiceAccountUPN)
-                )
-
-                if ($canReuseExistingDevConfiguration) {
-                    Write-Host 'Using the existing DEV environment credentials and service account you selected from the menu.' -ForegroundColor Green
-                    $devEnvironmentConfiguration = [pscustomobject]@{
-                        ShortName         = $devEnvShortName
-                        FriendlyName      = $(if ([string]::IsNullOrWhiteSpace($devEnvFriendlyName)) { $devEnvShortName } else { $devEnvFriendlyName })
-                        Url               = (ConvertTo-NormalizedEnvironmentUrl -Url $devEnvUrl)
-                        Credentials       = $existingSetupState.DevEnvironment.Credentials
-                        ServiceAccountUPN = $existingSetupState.DevEnvironment.ServiceAccountUPN
-                    }
-                }
-                else {
-                    if ($reuseExistingDevEnvironmentConfiguration -and -not $canReuseExistingDevConfiguration) {
-                        Write-Warning 'The existing DEV environment entry is missing either credentials or service account information, so setup needs to ask for the missing details.'
-                    }
-
-                    $devEnvironmentConfiguration = Invoke-WithErrorHandling -OperationName 'Selecting DEV credentials' -ScriptBlock {
-                        Get-GitHubEnvironmentConfiguration `
-                            -EnvironmentName $devEnvShortName `
-                            -EnvironmentUrl $devEnvUrl `
-                            -FriendlyName $devEnvFriendlyName `
-                            -ExistingCredentials $script:cachedCredentials `
-                            -ExistingServiceAccounts $script:cachedServiceAccounts `
-                            -TenantId $TenantId `
-                            -RepoName $repoName `
-                            -ExistingCredential $existingSetupState.DevEnvironment.Credentials `
-                            -ExistingServiceAccountUPN $existingSetupState.DevEnvironment.ServiceAccountUPN
-                    }
-                }
-
-                if ($devEnvironmentConfiguration -and -not ($script:cachedCredentials | Where-Object { $_.ApplicationId -eq $devEnvironmentConfiguration.Credentials.ApplicationId -and $_.TenantId -eq $devEnvironmentConfiguration.Credentials.TenantId })) {
-                    $script:cachedCredentials += $devEnvironmentConfiguration.Credentials
-                }
-                if ($devEnvironmentConfiguration -and $script:cachedServiceAccounts -notcontains $devEnvironmentConfiguration.ServiceAccountUPN) {
-                    $script:cachedServiceAccounts += $devEnvironmentConfiguration.ServiceAccountUPN
-                }
             }
         },
         [pscustomobject]@{
@@ -3225,10 +3352,10 @@ try {
                 Write-Section 'Review setup choices'
 
                 $allConfiguredEnvironments = @()
-                if ($devEnvironmentConfiguration) {
-                    $allConfiguredEnvironments += $devEnvironmentConfiguration
+                if ($wizardState.DevEnvironmentConfiguration) {
+                    $allConfiguredEnvironments += $wizardState.DevEnvironmentConfiguration
                 }
-                $allConfiguredEnvironments += @($deploymentEnvironments)
+                $allConfiguredEnvironments += @($wizardState.DeploymentEnvironments)
 
                 Show-KeyValueSummaryTable -Heading 'Setup review' -Values ([ordered]@{
                     'Repository'                = $repoFullName
@@ -3237,7 +3364,7 @@ try {
                     'Credential storage'        = $(if ($useGitHubEnvironments) { 'GitHub environments' } else { 'Prefixed repository variables/secrets' })
                     'Promotion mode'            = $deploymentPromotionMode
                     'Publish mode'              = $(if ($repoPublishPlan.Mode -eq 'PullRequest') { "Pull request into $($repoPublishPlan.TargetBranch) from $($repoPublishPlan.BranchName)" } else { "Direct commit to $($repoPublishPlan.BranchName)" })
-                    'Deployment environments'   = [string]$deploymentEnvironments.Count
+                    'Deployment environments'   = [string]$wizardState.DeploymentEnvironments.Count
                 })
 
                 Show-EnvironmentConfigurationTable -EnvironmentConfigurations $allConfiguredEnvironments
@@ -3245,6 +3372,13 @@ try {
             }
         }
     )
+
+    $solutionResult = $wizardState.SolutionResult
+    $devEnvUrl = $wizardState.DevEnvUrl
+    $devEnvFriendlyName = $wizardState.DevEnvFriendlyName
+    $reuseExistingDevEnvironmentConfiguration = $wizardState.ReuseExistingDevEnvironmentConfiguration
+    $devEnvironmentConfiguration = $wizardState.DevEnvironmentConfiguration
+    $deploymentEnvironments = @($wizardState.DeploymentEnvironments)
 
     Set-SetupPhaseContext -PhaseNames $script:setupPhaseNames -CurrentPhaseIndex 2
     $repoPublishResult = Invoke-WithErrorHandling -OperationName 'Publishing GitHub repository changes' -StatusMessage 'Publishing repository changes to GitHub...' -CaptureOutputInPanel -ScriptBlock {
@@ -3330,23 +3464,19 @@ Show-SetupCompletionScreen `
     -Heading 'GitHub Actions setup completed successfully!' `
     -AccessLabel 'Open your GitHub Actions page' `
     -AccessUrl "https://github.com/$repoFullName/actions" `
-    -MetricCards @(
-        @{ Label = 'Solutions'; AccentColor = 'green3_1'; Value = [string]@($solutionResult.Solutions).Count; Detail = 'Configured in alm-config.psd1' },
-        @{ Label = 'Environments'; AccentColor = 'yellow3'; Value = [string]($deploymentEnvironments.Count + $(if ($devEnvironmentConfiguration) { 1 } else { 0 })); Detail = 'DEV plus deployment stages' },
-        @{ Label = 'Credential storage'; AccentColor = 'deepskyblue1'; Value = $(if ($useGitHubEnvironments) { 'Environments' } else { 'Repo-level' }); Detail = 'Where secrets and variables are stored' },
-        @{ Label = 'Promotion'; AccentColor = 'mediumpurple3'; Value = $deploymentPromotionMode; Detail = 'DEPLOY workflow strategy' }
-    ) `
     -SummaryValues ([ordered]@{
         'Repository'              = $repoFullName
         'Shared workflow source'  = $sharedWorkflowRepository
+        'Repository publish'      = $(if ($repoPublishResult -and $repoPublishResult.Mode -eq 'PullRequest' -and $repoPublishResult.HasChanges) { "Pull request created from $($repoPublishResult.BranchName) to $($repoPublishResult.TargetBranch) (merge required)" } elseif ($repoPublishResult -and $repoPublishResult.Mode -eq 'PullRequest') { "Pull request mode selected, but no repository changes were detected so no branch or pull request was created" } elseif ($repoPublishResult -and $repoPublishResult.HasChanges) { "Direct commit to '$($repoPublishResult.BranchName)'" } else { 'No repository changes were needed' })
         'Promotion mode'          = $deploymentPromotionMode
         'Credential storage'      = $(if ($useGitHubEnvironments) { 'GitHub environments' } else { 'Prefixed repository variables/secrets' })
         'Configured environments' = [string]($deploymentEnvironments.Count + $(if ($devEnvironmentConfiguration) { 1 } else { 0 }))
     }) `
     -NextStepLinks @(
-        (Get-Alm4DataverseDocUrl -RelativePath 'docs/setup/github-setup.md' -Ref $ALM4DataverseRef),
-        (Get-Alm4DataverseDocUrl -RelativePath 'docs/config/github-secrets.md' -Ref $ALM4DataverseRef)
-    ) `
-    -Notes @(
-        $(if ($repoPublishResult -and $repoPublishResult.Mode -eq 'PullRequest' -and -not [string]::IsNullOrWhiteSpace($repoPublishResult.PullRequestUrl)) { "A pull request was opened: $($repoPublishResult.PullRequestUrl)" } elseif ($repoPublishResult -and $repoPublishResult.HasChanges) { "Repository changes were committed directly to '$($repoPublishResult.BranchName)'." } else { 'The repository already contained the generated files, so nothing new had to be committed.' })
+        $(if ($repoPublishResult -and $repoPublishResult.Mode -eq 'PullRequest' -and -not [string]::IsNullOrWhiteSpace($repoPublishResult.PullRequestUrl)) {
+            @{ Label = 'Review and merge the setup pull request (required before workflows are active)'; Url = $repoPublishResult.PullRequestUrl }
+        }),
+        @{ Label = 'Run EXPORT for your DEV environment'; Url = (Get-Alm4DataverseDocUrl -RelativePath 'docs/usage/exporting-changes.md' -Ref $ALM4DataverseRef) },
+        @{ Label = 'Configure EV and CR values for environments'; Url = (Get-Alm4DataverseDocUrl -RelativePath 'docs/setup/github-variables.md' -Ref $ALM4DataverseRef) },
+        @{ Label = 'Run DEPLOY to promote the build'; Url = (Get-Alm4DataverseDocUrl -RelativePath 'docs/usage/deploying.md' -Ref $ALM4DataverseRef) }
     )

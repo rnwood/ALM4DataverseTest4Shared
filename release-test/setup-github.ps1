@@ -44,46 +44,1594 @@ if ($setupCommonPath -and (Test-Path -LiteralPath $setupCommonPath)) {
     . $setupCommonPath
 }
 else {
-        function Write-Section {
-        param([Parameter(Mandatory)][string]$Message)
-    
-        Write-Progress -Completed -Activity "Done"
-        Clear-Host
-        Write-Host "==== $Message ====" -ForegroundColor Cyan
-        Write-Host ""
-    }
-    
-    function New-DirectoryIfMissing {
+        function New-DirectoryIfMissing {
         param([Parameter(Mandatory)][string]$Path)
         if (-not (Test-Path -LiteralPath $Path)) {
             New-Item -ItemType Directory -Path $Path -Force | Out-Null
         }
     }
     
+    function Initialize-SpectreConsole {
+        [CmdletBinding()]
+        param()
+    
+        if (Get-Variable -Name 'SpectreConsoleInitialized' -Scope Script -ErrorAction SilentlyContinue) {
+            return
+        }
+    
+        try {
+            [void][Spectre.Console.AnsiConsole]
+            $script:SpectreConsoleInitialized = $true
+            return
+        }
+        catch {
+            # Continue and load the assembly from the NuGet package.
+        }
+    
+        $spectreVersion = '0.53.1'
+        $packageRoot = Join-Path ([System.IO.Path]::GetTempPath()) 'ALM4Dataverse\SpectreConsole'
+        $expandedRoot = Join-Path $packageRoot $spectreVersion
+        $packagePath = Join-Path $packageRoot "Spectre.Console.$spectreVersion.nupkg"
+    
+        New-DirectoryIfMissing -Path $packageRoot
+    
+        if (-not (Test-Path -LiteralPath $expandedRoot)) {
+            if (-not (Test-Path -LiteralPath $packagePath)) {
+                try {
+                    if ($PSVersionTable.PSVersion.Major -lt 6) {
+                        [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
+                    }
+                }
+                catch {
+                    # Non-fatal; continue.
+                }
+    
+                $packageUrl = "https://www.nuget.org/api/v2/package/Spectre.Console/$spectreVersion"
+                Invoke-WebRequest -Uri $packageUrl -OutFile $packagePath -UseBasicParsing
+            }
+    
+            Expand-Archive -LiteralPath $packagePath -DestinationPath $expandedRoot -Force
+        }
+    
+        $candidateFrameworks = if ($PSVersionTable.PSEdition -eq 'Core') {
+            @('net8.0', 'netstandard2.0')
+        }
+        else {
+            @('netstandard2.0')
+        }
+    
+        $spectreAssemblyPath = $null
+        foreach ($candidateFramework in $candidateFrameworks) {
+            $candidatePath = Join-Path $expandedRoot "lib\$candidateFramework\Spectre.Console.dll"
+            if (Test-Path -LiteralPath $candidatePath) {
+                $spectreAssemblyPath = $candidatePath
+                break
+            }
+        }
+    
+        if (-not $spectreAssemblyPath) {
+            $spectreAssemblyPath = Get-ChildItem -Path $expandedRoot -Recurse -Filter 'Spectre.Console.dll' -File |
+                Select-Object -ExpandProperty FullName -First 1
+        }
+    
+        if (-not $spectreAssemblyPath) {
+            throw "Could not locate Spectre.Console.dll after extracting package version $spectreVersion."
+        }
+    
+        Add-Type -Path $spectreAssemblyPath -ErrorAction Stop
+        $script:SpectreConsoleInitialized = $true
+        $script:SpectreConsoleAssemblyPath = $spectreAssemblyPath
+    }
+    
+    function ConvertTo-SpectreMarkupLiteral {
+        [CmdletBinding()]
+        param(
+            [Parameter()][AllowNull()][string]$Text
+        )
+    
+        if ($null -eq $Text) {
+            return ''
+        }
+    
+        return ([string]$Text).Replace('[', '[[').Replace(']', ']]')
+    }
+    
+    function New-SpectreTable {
+        [CmdletBinding()]
+        param(
+            [Parameter(Mandatory)][string[]]$Columns
+        )
+    
+        Initialize-SpectreConsole
+    
+        $table = [Spectre.Console.Table]::new()
+        foreach ($column in $Columns) {
+            [void]$table.AddColumn([Spectre.Console.TableColumn]::new("[grey]$(ConvertTo-SpectreMarkupLiteral -Text $column)[/]"))
+        }
+    
+        return $table
+    }
+    
+    function Add-SpectreTableRow {
+        [CmdletBinding()]
+        param(
+            [Parameter(Mandatory)]$Table,
+            [Parameter(Mandatory)][string[]]$Cells
+        )
+    
+        Initialize-SpectreConsole
+    
+        $renderables = [Spectre.Console.Rendering.IRenderable[]]@(
+            foreach ($cell in $Cells) {
+                [Spectre.Console.Markup]::new((ConvertTo-SpectreMarkupLiteral -Text $cell))
+            }
+        )
+    
+        [void]$Table.Rows.Add($renderables)
+    }
+    
+    function New-SpectrePanel {
+        [CmdletBinding()]
+        param(
+            [Parameter(Mandatory)]$Content,
+            [Parameter()][string]$Header,
+            [Parameter()][string]$HeaderMarkup,
+            [Parameter()][string]$BorderColor = 'grey35',
+            [Parameter()][switch]$Expand,
+            [Parameter()][int]$PaddingX = 1,
+            [Parameter()][int]$PaddingY = 0
+        )
+    
+        Initialize-SpectreConsole
+    
+        $panel = [Spectre.Console.Panel]::new($Content)
+        $panel.Border = [Spectre.Console.BoxBorder]::Rounded
+        $panel.BorderStyle = [Spectre.Console.Style]::Parse($BorderColor)
+        $panel.Padding = [Spectre.Console.Padding]::new($PaddingX, $PaddingY, $PaddingX, $PaddingY)
+        $panel.Expand = $Expand.IsPresent
+    
+        if (-not [string]::IsNullOrWhiteSpace($HeaderMarkup)) {
+            $panel.Header = [Spectre.Console.PanelHeader]::new($HeaderMarkup)
+        }
+        elseif (-not [string]::IsNullOrWhiteSpace($Header)) {
+            $panel.Header = [Spectre.Console.PanelHeader]::new("[bold]$(ConvertTo-SpectreMarkupLiteral -Text $Header)[/]")
+        }
+    
+        return $panel
+    }
+    
+    function New-SpectreInfoGrid {
+        [CmdletBinding()]
+        param(
+            [Parameter(Mandatory)][hashtable]$Values,
+            [Parameter()][int]$LabelWidth = 18
+        )
+    
+        Initialize-SpectreConsole
+    
+        $grid = [Spectre.Console.Grid]::new()
+        $grid.Expand = $true
+    
+        $labelColumn = [Spectre.Console.GridColumn]::new()
+        $labelColumn.NoWrap = $true
+        $labelColumn.Width = $LabelWidth
+        $labelColumn.Padding = [Spectre.Console.Padding]::new(0, 0, 2, 0)
+    
+        [void]$grid.AddColumn($labelColumn)
+        [void]$grid.AddColumn()
+    
+        foreach ($entry in $Values.GetEnumerator()) {
+            [void]$grid.AddRow([Spectre.Console.Rendering.IRenderable[]]@(
+                [Spectre.Console.Markup]::new("[grey]$(ConvertTo-SpectreMarkupLiteral -Text ([string]$entry.Key))[/]"),
+                [Spectre.Console.Markup]::new("[white]$(ConvertTo-SpectreMarkupLiteral -Text ([string]$entry.Value))[/]")
+            ))
+        }
+    
+        return $grid
+    }
+    
+    function New-SpectreMetricColumns {
+        [CmdletBinding()]
+        param(
+            [Parameter(Mandatory)][array]$Cards
+        )
+    
+        Initialize-SpectreConsole
+    
+        $renderables = [Spectre.Console.Rendering.IRenderable[]]@(
+            foreach ($card in @($Cards)) {
+                if ($null -eq $card) {
+                    continue
+                }
+    
+                $label = ''
+                $value = ''
+                $detail = ''
+                $accentColor = 'deepskyblue1'
+    
+                if ($card -is [hashtable]) {
+                    $label = [string]$card.Label
+                    $value = [string]$card.Value
+                    $detail = [string]$card.Detail
+                    if ($card.ContainsKey('AccentColor') -and -not [string]::IsNullOrWhiteSpace($card.AccentColor)) {
+                        $accentColor = [string]$card.AccentColor
+                    }
+                }
+                else {
+                    if ($card.PSObject.Properties.Name -contains 'Label') { $label = [string]$card.Label }
+                    if ($card.PSObject.Properties.Name -contains 'Value') { $value = [string]$card.Value }
+                    if ($card.PSObject.Properties.Name -contains 'Detail') { $detail = [string]$card.Detail }
+                    if ($card.PSObject.Properties.Name -contains 'AccentColor' -and -not [string]::IsNullOrWhiteSpace($card.AccentColor)) {
+                        $accentColor = [string]$card.AccentColor
+                    }
+                }
+    
+                $lines = @(
+                    "[bold $accentColor]$(ConvertTo-SpectreMarkupLiteral -Text $value)[/]",
+                    "[grey]$(ConvertTo-SpectreMarkupLiteral -Text $label)[/]"
+                )
+                if (-not [string]::IsNullOrWhiteSpace($detail)) {
+                    $lines += "[dim]$(ConvertTo-SpectreMarkupLiteral -Text $detail)[/]"
+                }
+    
+                New-SpectrePanel -Content ([Spectre.Console.Markup]::new(($lines -join [Environment]::NewLine))) -BorderColor $accentColor -Expand
+            }
+        )
+    
+        $columns = [Spectre.Console.Columns]::new($renderables)
+        $columns.Expand = $true
+        $columns.Padding = [Spectre.Console.Padding]::new(1, 0, 1, 0)
+        return $columns
+    }
+    
+    function Show-SpectreMetricCards {
+        [CmdletBinding()]
+        param(
+            [Parameter(Mandatory)][array]$Cards
+        )
+    
+        $filteredCards = @($Cards | Where-Object { $null -ne $_ })
+        if ($filteredCards.Count -eq 0) {
+            return
+        }
+    
+        Initialize-SpectreConsole
+        [Spectre.Console.AnsiConsole]::Write((New-SpectreMetricColumns -Cards $filteredCards))
+        [Spectre.Console.AnsiConsole]::WriteLine()
+    }
+    
+    function Show-SolutionSelectionOverview {
+        [CmdletBinding()]
+        param(
+            [Parameter(Mandatory)][int]$SelectedCount,
+            [Parameter(Mandatory)][int]$AvailableCount
+        )
+    
+        $remainingCount = [Math]::Max($AvailableCount - $SelectedCount, 0)
+        Show-SpectreMetricCards -Cards @(
+            @{ Label = 'Selected'; AccentColor = 'green3_1'; Value = [string]$SelectedCount; Detail = 'Chosen for source control' },
+            @{ Label = 'Remaining'; AccentColor = $(if ($remainingCount -gt 0) { 'deepskyblue1' } else { 'grey42' }); Value = [string]$remainingCount; Detail = 'Still available to add' },
+            @{ Label = 'Available total'; AccentColor = 'mediumpurple3'; Value = [string]$AvailableCount; Detail = 'Detected in the environment' }
+        )
+    }
+    
+    function Show-EnvironmentConfigurationOverview {
+        [CmdletBinding()]
+        param(
+            [Parameter()][array]$EnvironmentConfigurations
+        )
+    
+        $items = @($EnvironmentConfigurations)
+        $pendingCount = 0
+        $wifCount = 0
+        $secretCount = 0
+        $uniqueServiceAccounts = @()
+    
+        foreach ($env in $items) {
+            $hasCredential = ($env.PSObject.Properties.Name -contains 'Credentials' -and $null -ne $env.Credentials)
+            $hasServiceAccount = ($env.PSObject.Properties.Name -contains 'ServiceAccountUPN' -and -not [string]::IsNullOrWhiteSpace($env.ServiceAccountUPN))
+            $isPending = ($env.PSObject.Properties.Name -contains 'ConfigurationPending' -and $env.ConfigurationPending) -or -not $hasCredential -or -not $hasServiceAccount
+            if ($isPending) {
+                $pendingCount++
+            }
+    
+            if ($hasCredential -and $env.Credentials.PSObject.Properties.Name -contains 'AuthType') {
+                switch ([string]$env.Credentials.AuthType) {
+                    'WIF' { $wifCount++ }
+                    'Secret' { $secretCount++ }
+                }
+            }
+    
+            if ($hasServiceAccount) {
+                $uniqueServiceAccounts += [string]$env.ServiceAccountUPN
+            }
+        }
+    
+        $uniqueServiceAccounts = @($uniqueServiceAccounts | Select-Object -Unique)
+        $authMix = if (($wifCount + $secretCount) -eq 0) {
+            'Unassigned'
+        }
+        elseif ($wifCount -gt 0 -and $secretCount -gt 0) {
+            'Mixed'
+        }
+        elseif ($wifCount -gt 0) {
+            'WIF'
+        }
+        else {
+            'Secret'
+        }
+    
+        Show-SpectreMetricCards -Cards @(
+            @{ Label = 'Environments'; AccentColor = 'yellow3'; Value = [string]$items.Count; Detail = 'Configured stages' },
+            @{ Label = 'Pending setup'; AccentColor = $(if ($pendingCount -gt 0) { 'red3_1' } else { 'green3_1' }); Value = [string]$pendingCount; Detail = $(if ($pendingCount -gt 0) { 'Need credentials or service accounts' } else { 'Ready for apply' }) },
+            @{ Label = 'Auth mode'; AccentColor = 'deepskyblue1'; Value = $authMix; Detail = "WIF: $wifCount • Secret: $secretCount" },
+            @{ Label = 'Service accounts'; AccentColor = 'mediumpurple3'; Value = [string]$uniqueServiceAccounts.Count; Detail = 'Unique automation owners' }
+        )
+    }
+    
+    function Show-KeyValueSummaryTable {
+        [CmdletBinding()]
+        param(
+            [Parameter(Mandatory)][hashtable]$Values,
+            [Parameter()][string]$Heading = 'Summary'
+        )
+    
+        Initialize-SpectreConsole
+    
+        $table = New-SpectreTable -Columns @('Setting', 'Value')
+        foreach ($entry in $Values.GetEnumerator()) {
+            Add-SpectreTableRow -Table $table -Cells @([string]$entry.Key, [string]$entry.Value)
+        }
+    
+        [Spectre.Console.AnsiConsole]::Write((New-SpectrePanel -Content $table -Header $Heading -BorderColor 'mediumspringgreen' -Expand))
+        [Spectre.Console.AnsiConsole]::WriteLine()
+    }
+    
+    function Set-SetupWizardContext {
+        [CmdletBinding()]
+        param(
+            [Parameter(Mandatory)][string]$Title,
+            [Parameter(Mandatory)][string[]]$StepNames,
+            [Parameter(Mandatory)][int]$CurrentStepIndex
+        )
+    
+        $script:SetupWizardContext = [pscustomobject]@{
+            Title            = $Title
+            StepNames        = @($StepNames)
+            CurrentStepIndex = $CurrentStepIndex
+        }
+    }
+    
+    function Set-SetupPhaseContext {
+        [CmdletBinding()]
+        param(
+            [Parameter(Mandatory)][string[]]$PhaseNames,
+            [Parameter(Mandatory)][int]$CurrentPhaseIndex
+        )
+    
+        $script:SetupPhaseContext = [pscustomobject]@{
+            PhaseNames         = @($PhaseNames)
+            CurrentPhaseIndex  = $CurrentPhaseIndex
+        }
+    }
+    
+    function Clear-SetupPhaseContext {
+        [CmdletBinding()]
+        param()
+    
+        Remove-Variable -Name 'SetupPhaseContext' -Scope Script -ErrorAction SilentlyContinue
+    }
+    
+    function Get-SetupPhaseContext {
+        [CmdletBinding()]
+        param()
+    
+        return (Get-Variable -Name 'SetupPhaseContext' -Scope Script -ValueOnly -ErrorAction SilentlyContinue)
+    }
+    
+    function Clear-SetupWizardContext {
+        [CmdletBinding()]
+        param()
+    
+        Remove-Variable -Name 'SetupWizardContext' -Scope Script -ErrorAction SilentlyContinue
+    }
+    
+    function Get-SetupWizardContext {
+        [CmdletBinding()]
+        param()
+    
+        return (Get-Variable -Name 'SetupWizardContext' -Scope Script -ValueOnly -ErrorAction SilentlyContinue)
+    }
+    
+    function Get-SetupCurrentSectionMessage {
+        [CmdletBinding()]
+        param()
+    
+        return (Get-Variable -Name 'SetupCurrentSectionMessage' -Scope Script -ValueOnly -ErrorAction SilentlyContinue)
+    }
+    
+    function Set-SetupPromptDocContext {
+        [CmdletBinding()]
+        param(
+            [Parameter()][string]$DocRelativePath,
+            [Parameter()][string]$Ref,
+            [Parameter()][string]$LinkLabel = 'Click for docs'
+        )
+    
+        $script:SetupPromptDocContext = [pscustomobject]@{
+            DocRelativePath = $DocRelativePath
+            Ref             = $Ref
+            LinkLabel       = $LinkLabel
+        }
+    }
+    
+    function Clear-SetupPromptDocContext {
+        [CmdletBinding()]
+        param()
+    
+        Remove-Variable -Name 'SetupPromptDocContext' -Scope Script -ErrorAction SilentlyContinue
+    }
+    
+    function Get-SetupPromptDocContext {
+        [CmdletBinding()]
+        param()
+    
+        return (Get-Variable -Name 'SetupPromptDocContext' -Scope Script -ValueOnly -ErrorAction SilentlyContinue)
+    }
+    
+    function Request-SetupWizardBack {
+        [CmdletBinding()]
+        param()
+    
+        throw ([System.InvalidOperationException]::new('__ALM4DATAVERSE_WIZARD_BACK__'))
+    }
+    
+    function Test-IsSetupWizardBackException {
+        [CmdletBinding()]
+        param(
+            [Parameter(Mandatory)][System.Exception]$Exception
+        )
+    
+        $current = $Exception
+        while ($null -ne $current) {
+            if ($current -is [System.InvalidOperationException] -and $current.Message -eq '__ALM4DATAVERSE_WIZARD_BACK__') {
+                return $true
+            }
+    
+            $current = $current.InnerException
+        }
+    
+        return $false
+    }
+    
+    function New-SetupHeroPanel {
+        [CmdletBinding()]
+        param(
+            [Parameter(Mandatory)][string]$Message
+        )
+    
+        Initialize-SpectreConsole
+    
+        return "ALM4Dataverse Setup - $Message"
+    }
+    
+    function New-SetupTipsPanel {
+        [CmdletBinding()]
+        param()
+    
+        Initialize-SpectreConsole
+    
+        $tipLines = @(
+            '• Use ↑ and ↓ to move through prompts.',
+            '• Press Enter to confirm the highlighted option.',
+            '• Longer lists automatically enable search so you can type to filter.',
+            '• The wizard navigation menu appears after each step so you can go back before applying changes.'
+        )
+    
+        return (New-SpectrePanel -Content ([Spectre.Console.Markup]::new(('[grey]' + (($tipLines | ForEach-Object { ConvertTo-SpectreMarkupLiteral -Text $_ }) -join '[/]' + [Environment]::NewLine + '[grey]') + '[/]'))) -Header 'Controls and flow' -BorderColor 'grey42' -Expand)
+    }
+    
+    function Write-SetupDashboard {
+        [CmdletBinding()]
+        param(
+            [Parameter(Mandatory)][string]$Message,
+            [Parameter()][switch]$IncludeTrailingSpacer
+        )
+    
+        Initialize-SpectreConsole
+    
+        if (-not (Write-SetupConsoleBar -Text (New-SetupHeroPanel -Message $Message) -ForegroundColor ([ConsoleColor]::Black) -BackgroundColor ([ConsoleColor]::Gray) -AdvanceCursor)) {
+            $heroText = "[black on grey]$(ConvertTo-SpectreMarkupLiteral -Text (New-SetupHeroPanel -Message $Message))[/]"
+            [Spectre.Console.AnsiConsole]::MarkupLine($heroText)
+        }
+    
+        if ($IncludeTrailingSpacer) {
+            [Spectre.Console.AnsiConsole]::WriteLine()
+        }
+    }
+    
+    function Test-IsUserInterruptException {
+        [CmdletBinding()]
+        param(
+            [Parameter(Mandatory)][System.Exception]$Exception
+        )
+    
+        $current = $Exception
+        while ($null -ne $current) {
+            if (
+                $current -is [System.Management.Automation.PipelineStoppedException] -or
+                $current -is [System.OperationCanceledException] -or
+                $current -is [System.Threading.Tasks.TaskCanceledException]
+            ) {
+                return $true
+            }
+    
+            $current = $current.InnerException
+        }
+    
+        return $false
+    }
+    
+    function Invoke-SetupWizard {
+        [CmdletBinding()]
+        param(
+            [Parameter(Mandatory)][string]$Title,
+            [Parameter(Mandatory)][array]$Steps
+        )
+    
+        if ($Steps.Count -eq 0) {
+            return
+        }
+    
+        $currentStepIndex = 0
+        $stepNames = @($Steps | ForEach-Object { [string]$_.Name })
+    
+        try {
+            while ($currentStepIndex -lt $Steps.Count) {
+                try {
+                    Set-SetupWizardContext -Title $Title -StepNames $stepNames -CurrentStepIndex $currentStepIndex
+                    & $Steps[$currentStepIndex].Action
+                    $currentStepIndex++
+                }
+                catch {
+                    if (Test-IsSetupWizardBackException -Exception $_.Exception) {
+                        if ($currentStepIndex -gt 0) {
+                            $currentStepIndex--
+                        }
+    
+                        continue
+                    }
+    
+                    throw
+                }
+            }
+        }
+        finally {
+            Clear-SetupWizardContext
+        }
+    }
+    
+    function Confirm-SetupReviewAction {
+        [CmdletBinding()]
+        param(
+            [Parameter()][string]$ApplyLabel = 'Apply changes',
+            [Parameter()][string]$CancelLabel = 'Cancel setup',
+            [Parameter()][string]$Title = 'Review complete. Apply the configuration or cancel setup.'
+        )
+    
+        $selection = Select-FromMenu -Title $Title -Items @($ApplyLabel, $CancelLabel)
+        if ($null -eq $selection) {
+            throw 'Setup cancelled by user.'
+        }
+    
+        if ($selection -ne 0) {
+            throw 'Setup cancelled by user.'
+        }
+    }
+    
+    function Get-SetupPromptGuidance {
+        [CmdletBinding()]
+        param(
+            [Parameter(Mandatory)][ValidateSet('Menu', 'Text', 'YesNo', 'Secret')][string]$PromptKind,
+            [Parameter(Mandatory)][string]$PromptText
+        )
+    
+        $currentSectionMessage = Get-SetupCurrentSectionMessage
+        $docContext = Get-SetupPromptDocContext
+    
+        $guidanceRules = @(
+            [pscustomobject]@{
+                Kinds          = @('Menu')
+                PromptPattern  = '^GitHub authentication$'
+                SectionPattern = '^Authenticating with GitHub$'
+                Lines          = @(
+                    'Choose which GitHub account setup should use for repository access, workflow creation, and environment management.',
+                    'If you switch accounts, setup will sign out of the current GitHub CLI session and open a browser so you can sign in again.'
+                )
+                DocRelativePath = 'docs/setup/github-setup.md'
+            },
+            [pscustomobject]@{
+                Kinds          = @('Menu')
+                PromptPattern  = '^Azure authentication$'
+                SectionPattern = '^Authenticating with Azure$'
+                Lines          = @(
+                    'Choose which Azure sign-in setup should use for Entra ID app registrations and Dataverse access during GitHub setup.',
+                    'Use an account that can reach the tenant and the DEV environment you plan to configure.'
+                )
+                DocRelativePath = 'docs/setup/github-setup.md'
+            },
+            [pscustomobject]@{
+                Kinds          = @('Menu')
+                PromptPattern  = '^Azure authentication$'
+                SectionPattern = '^Authenticating$'
+                Lines          = @(
+                    'Choose which Azure sign-in setup should use for Azure DevOps access, service connections, and Dataverse configuration.',
+                    'Use an account that can access the target organization or project and the DEV environment you plan to configure.'
+                )
+                DocRelativePath = 'docs/setup/azdo-automated-setup.md'
+            },
+            [pscustomobject]@{
+                Kinds         = @('Menu')
+                PromptPattern = '^Open the browser for Azure authentication when you are ready\.$'
+                Lines         = @(
+                    'Continue when you are ready for setup to open the browser and complete the Azure sign-in flow.',
+                    'This is used to obtain the tokens needed for the remaining automated setup steps.'
+                )
+            },
+            [pscustomobject]@{
+                Kinds         = @('Menu')
+                PromptPattern = '^Select the repository to set up ALM4Dataverse in$'
+                Lines         = @(
+                    'Choose the main repository where ALM4Dataverse should add workflow files and repository configuration.',
+                    'This is the repo your solutions and other assets will live in.'
+                )
+                DocRelativePath = 'docs/setup/github-setup.md'
+            },
+            [pscustomobject]@{
+                Kinds         = @('Menu')
+                PromptPattern = '^Select shared workflow repository$'
+                Lines         = @(
+                    'Select the repo where you want to store the reusable ALM4Dataverse workflows.',
+                    'It should be a different repo from your main application repo so multiple repos can reference the same shared workflow source.'
+                )
+                DocRelativePath = 'docs/setup/github-setup.md'
+            },
+            [pscustomobject]@{
+                Kinds         = @('Menu')
+                PromptPattern = '^Select repository visibility$'
+                Lines         = @(
+                    'Choose whether the new repository should be public or private.',
+                    'Private is the safer default when the repo will hold organization-specific configuration or automation.'
+                )
+                DocRelativePath = 'docs/setup/github-setup.md'
+            },
+            [pscustomobject]@{
+                Kinds         = @('Menu')
+                PromptPattern = "^Select App Registration credentials for '.+'$"
+                Lines         = @(
+                    'Choose the App Registration that workflows should use to authenticate to Dataverse for this environment.',
+                    'You can reuse an existing registration or create a new one if you want tighter isolation per environment.'
+                )
+            },
+            [pscustomobject]@{
+                Kinds         = @('Menu')
+                PromptPattern = "^How should setup handle the existing client secret for '.+'\?$"
+                Lines         = @(
+                    'Decide whether setup should keep using the existing client secret or replace it.',
+                    'Keeping it avoids touching downstream consumers; replacing it is useful if you want to rotate credentials now.'
+                )
+            },
+            [pscustomobject]@{
+                Kinds         = @('Menu')
+                PromptPattern = '^Select authentication type for the new App Registration$'
+                Lines         = @(
+                    'Choose how the new App Registration should authenticate.',
+                    'Workload identity federation avoids storing a secret; client-secret mode works on older patterns but requires secret management.'
+                )
+                DocRelativePath = 'docs/setup/github-setup.md'
+            },
+            [pscustomobject]@{
+                Kinds         = @('Menu')
+                PromptPattern = '^Select authentication type for the new service connection$'
+                Lines         = @(
+                    'Choose how the Azure DevOps service connection should authenticate.',
+                    'Workload identity federation is the modern option; secret-based auth is the fallback when federation is not available.'
+                )
+                DocRelativePath = 'docs/config/azdo-environment-service-connection.md'
+            },
+            [pscustomobject]@{
+                Kinds         = @('Menu')
+                PromptPattern = '^Select authentication type$'
+                Lines         = @(
+                    'Choose whether the credentials should use workload identity federation or a client secret.',
+                    'This affects which values setup asks for and how the automation will be authorized later.'
+                )
+            },
+            [pscustomobject]@{
+                Kinds         = @('Menu')
+                PromptPattern = "^Select Dataverse Service Account for '.+'$"
+                Lines         = @(
+                    'Choose which Dataverse user account should own automated changes in this environment.',
+                    'Use a dedicated service account where possible so imports, deployment actions, and ownership are easy to audit.'
+                )
+            },
+            [pscustomobject]@{
+                Kinds         = @('Menu')
+                PromptPattern = '^Select an Azure DevOps organization$'
+                Lines         = @(
+                    'Choose the Azure DevOps organization that will host the project, repositories, pipelines, and approvals for this setup.',
+                    'Make sure you pick the long-lived organization your team already uses for ALM assets.'
+                )
+                DocRelativePath = 'docs/setup/azdo-automated-setup.md'
+            },
+            [pscustomobject]@{
+                Kinds         = @('Menu')
+                PromptPattern = '^Select the target Azure DevOps project$'
+                Lines         = @(
+                    'Choose the Azure DevOps project that should contain the ALM repositories, pipelines, service connections, and approvals.',
+                    'Use a stable project name instead of one tied to a temporary phase or release.'
+                )
+                DocRelativePath = 'docs/setup/azdo-automated-setup.md'
+            },
+            [pscustomobject]@{
+                Kinds         = @('Menu')
+                PromptPattern = '^Select a process \(template\) for the new project$'
+                Lines         = @(
+                    'Choose the Azure DevOps work-item process template for the new project.',
+                    'This affects boards and work tracking, not the ALM4Dataverse pipeline behavior itself.'
+                )
+                DocRelativePath = 'docs/setup/azdo-automated-setup.md'
+            },
+            [pscustomobject]@{
+                Kinds          = @('Menu')
+                PromptPattern  = '^Select the repo$'
+                SectionPattern = '^Selecting main Git repository$'
+                Lines          = @(
+                    'Choose the main application repository where ALM4Dataverse should add pipeline YAML and configuration files.',
+                    'Do not pick the shared template repo here; this should be the repo that contains your solution source.'
+                )
+                DocRelativePath = 'docs/setup/azdo-automated-setup.md'
+            },
+            [pscustomobject]@{
+                Kinds         = @('Menu')
+                PromptPattern = '^Select the shared repository that will host the ALM4Dataverse templates$'
+                Lines         = @(
+                    'Select the repo where you want to store the reusable ALM4Dataverse templates and shared pipeline assets.',
+                    'It should be a different repo from your main application repo so multiple repos can consume the same shared source.'
+                )
+                DocRelativePath = 'docs/setup/azdo-automated-setup.md'
+            },
+            [pscustomobject]@{
+                Kinds         = @('Menu')
+                PromptPattern = "^Select Service Principal credentials for '.+'$"
+                Lines         = @(
+                    'Choose the service principal or service connection that Azure DevOps should use for this environment.',
+                    'You can reuse credentials when appropriate, or create a dedicated identity for stronger isolation.'
+                )
+                DocRelativePath = 'docs/config/azdo-environment-service-connection.md'
+            },
+            [pscustomobject]@{
+                Kinds         = @('Menu')
+                PromptPattern = '^Manage solutions$'
+                Lines         = @(
+                    'Use this menu to build the ordered list of unmanaged Dataverse solutions that should be kept in source control.',
+                    'The order matters because setup writes it into `alm-config.psd1` and later automation uses that sequence.'
+                )
+                DocRelativePath = 'docs/config/alm-config.md'
+            },
+            [pscustomobject]@{
+                Kinds         = @('Menu')
+                PromptPattern = '^Select a solution to add$'
+                Lines         = @(
+                    'Choose the next unmanaged solution to add to the source-controlled list.',
+                    'Start with the lowest-level dependencies so the final order matches how solutions should be processed.'
+                )
+                DocRelativePath = 'docs/config/alm-config.md'
+            },
+            [pscustomobject]@{
+                Kinds         = @('Menu')
+                PromptPattern = '^Manage deployment environments$'
+                Lines         = @(
+                    'Use this menu to add, edit, or remove the Dataverse environments that form your deployment path.',
+                    'Keep the short names stable and the list in promotion order, because that order becomes the generated stage chain.'
+                )
+            },
+            [pscustomobject]@{
+                Kinds         = @('Menu')
+                PromptPattern = '^Select the environment to edit$'
+                Lines         = @(
+                    'Choose which configured environment entry you want to update.',
+                    'Editing lets you correct the target Dataverse URL, short name, credentials, or service account before setup applies changes.'
+                )
+            },
+            [pscustomobject]@{
+                Kinds         = @('Menu')
+                PromptPattern = '^Select the environment to remove$'
+                Lines         = @(
+                    'Choose which configured environment entry should be removed from the deployment plan.',
+                    'Removing it here prevents setup from generating or updating that stage during this run.'
+                )
+            },
+            [pscustomobject]@{
+                Kinds         = @('Menu')
+                PromptPattern = "^Select (your DEV environment|your DEV Dataverse environment|a Dataverse environment for deployment|the Dataverse environment for '.+'|a deployment environment|the deployment environment for '.+'|a Dataverse environment|Resolve the Dataverse environment for existing deployment stage '.+')$"
+                Lines         = @(
+                    'Choose the actual Dataverse environment that should back this stage or configuration slot.',
+                    'Check the friendly name and URL carefully so setup does not point DEV or deployment automation at the wrong environment.'
+                )
+            },
+            [pscustomobject]@{
+                Kinds         = @('Menu')
+                PromptPattern = '^Review complete\. Apply the configuration or cancel setup\.$'
+                Lines         = @(
+                    'Review this final choice before setup writes files, updates repositories, or provisions credentials and connections.',
+                    'Choose Apply changes to continue, or cancel if you want to go back and adjust the plan first.'
+                )
+            },
+            [pscustomobject]@{
+                Kinds         = @('Menu')
+                PromptPattern = '^How would you like to proceed\?$'
+                Lines         = @(
+                    'The previous action failed, so decide whether setup should retry, skip the step, or stop completely.',
+                    'Skipping is handy for exploration, but it can leave the generated configuration incomplete.'
+                )
+            },
+            [pscustomobject]@{
+                Kinds         = @('Menu')
+                PromptPattern = '^How should the .+ repository changes be published\?$'
+                Lines         = @(
+                    'Choose whether setup should commit changes directly or push them to a branch for review in a pull request.',
+                    'Direct commit is fastest; pull request mode is safer when branch protection or review gates are in play.'
+                )
+            },
+            [pscustomobject]@{
+                Kinds         = @('Menu')
+                PromptPattern = "^(Fork|Shared workflow repository) '.+' has diverged from upstream\. Choose how to update it\.$"
+                Lines         = @(
+                    'The selected shared workflow repository no longer matches the upstream ALM4Dataverse source cleanly, so choose how setup should reconcile it.',
+                    'Rebase preserves your commits where possible; reset force-aligns the repository to upstream and discards divergent history.'
+                )
+                DocRelativePath = 'docs/setup/github-setup.md'
+            },
+            [pscustomobject]@{
+                Kinds         = @('Menu')
+                PromptPattern = "^How should '.+' be created\?$"
+                Lines         = @(
+                    'Choose whether setup should create a public fork of the upstream shared-workflow repo or a brand-new private repository.',
+                    'Public (fork) keeps the GitHub fork relationship; private creates an independent repo that setup can still sync from upstream.'
+                )
+                DocRelativePath = 'docs/setup/github-setup.md'
+            },
+            [pscustomobject]@{
+                Kinds         = @('Text')
+                PromptPattern = '^(Fork|Shared workflow) repository name$'
+                Lines         = @(
+                    'Enter the GitHub repository name for the shared workflow repository setup should create or reuse.',
+                    'A clear stable name helps when multiple application repos will reference the same shared workflow source.'
+                )
+                DocRelativePath = 'docs/setup/github-setup.md'
+            },
+            [pscustomobject]@{
+                Kinds         = @('Menu')
+                PromptPattern = "^The shared repo '.+' has diverged\. Choose how to update it\.$"
+                Lines         = @(
+                    'The selected shared repository no longer matches the upstream ALM4Dataverse source cleanly, so choose how setup should reconcile it.',
+                    'Rebase preserves your extra commits where possible; reset force-aligns the repo to upstream and discards divergent history.'
+                )
+                DocRelativePath = 'docs/setup/azdo-automated-setup.md'
+            },
+            [pscustomobject]@{
+                Kinds         = @('Text')
+                PromptPattern = '^Repository owner \(user or organization\)$'
+                Lines         = @(
+                    'Enter the GitHub user or organization that should own the new repository.',
+                    'Use the team-owned organization when the repo should outlive a single developer account.'
+                )
+                DocRelativePath = 'docs/setup/github-setup.md'
+            },
+            [pscustomobject]@{
+                Kinds         = @('Text')
+                PromptPattern = '^New repository name$'
+                Lines         = @(
+                    'Enter the name for the new repository that will receive the generated ALM4Dataverse files.',
+                    'Pick a durable name that matches the application or solution set you are automating.'
+                )
+                DocRelativePath = 'docs/setup/github-setup.md'
+            },
+            [pscustomobject]@{
+                Kinds         = @('Text')
+                PromptPattern = '^Friendly name \(for reuse reference\)$'
+                Lines         = @(
+                    'Enter a friendly label that makes this credential easy to recognise if you want to reuse it later in setup.',
+                    'This is just a setup-time reference label, so choose something descriptive rather than secret.'
+                )
+            },
+            [pscustomobject]@{
+                Kinds         = @('Text')
+                PromptPattern = '^Credential name \(for reuse reference\)$'
+                Lines         = @(
+                    'Enter a friendly label that makes this credential easy to recognise if you want to reuse it later in setup.',
+                    'This label is for setup convenience and should describe the identity and environment clearly.'
+                )
+            },
+            [pscustomobject]@{
+                Kinds         = @('Text')
+                PromptPattern = '^Application ID \(Client ID\)$'
+                Lines         = @(
+                    'Enter the Application (client) ID of the Entra ID App Registration that should be used for this environment.',
+                    'Copy the value from App registrations > Overview so setup can bind the automation to the correct identity.'
+                )
+            },
+            [pscustomobject]@{
+                Kinds         = @('Text')
+                PromptPattern = '^Application object ID \(from App registrations > Overview, not the enterprise app object ID\)$'
+                Lines         = @(
+                    'Enter the App Registration object ID from the Entra ID App registrations blade, not the Enterprise applications object ID.',
+                    'Setup needs this specific object ID when it creates or updates workload identity configuration.'
+                )
+            },
+            [pscustomobject]@{
+                Kinds         = @('Text')
+                PromptPattern = '^Service Account UPN \(for example: serviceaccount@contoso\.com\)$'
+                Lines         = @(
+                    'Enter the UPN of the Dataverse user account that should own automated changes in this environment.',
+                    'Use a dedicated service account where practical so ownership and audit trails stay clear.'
+                )
+            },
+            [pscustomobject]@{
+                Kinds         = @('Text')
+                PromptPattern = '^Enter a short name for this environment$'
+                Lines         = @(
+                    'Enter the stable short name that should identify this environment in pipeline and workflow stage names.',
+                    'Use concise names such as TEST, UAT, or PROD and keep them stable over time.'
+                )
+            },
+            [pscustomobject]@{
+                Kinds         = @('Text')
+                PromptPattern = '^Branch to commit to$'
+                Lines         = @(
+                    'Enter the branch that should receive the generated setup changes directly.',
+                    'Use the protected or default branch only if your governance rules allow direct commits from automation setup.'
+                )
+            },
+            [pscustomobject]@{
+                Kinds         = @('Text')
+                PromptPattern = '^Branch to push for the pull request$'
+                Lines         = @(
+                    'Enter the working branch name setup should push before opening a pull request.',
+                    'A clear branch name makes the purpose of the generated change set obvious to reviewers.'
+                )
+            },
+            [pscustomobject]@{
+                Kinds         = @('Text')
+                PromptPattern = '^Pull request title$'
+                Lines         = @(
+                    'Enter the title that reviewers will see on the generated pull request.',
+                    'Keep it short but descriptive so the automation-related change is easy to spot in repo history.'
+                )
+            },
+            [pscustomobject]@{
+                Kinds         = @('Text')
+                PromptPattern = '^Enter the name for the new Azure DevOps project$'
+                Lines         = @(
+                    'Enter the name of the Azure DevOps project that should host your repositories, pipelines, and approvals.',
+                    'Choose a long-lived project name rather than something tied to a one-off migration or release.'
+                )
+                DocRelativePath = 'docs/setup/azdo-automated-setup.md'
+            },
+            [pscustomobject]@{
+                Kinds         = @('Text')
+                PromptPattern = '^Enter the name for the new main repository$'
+                Lines         = @(
+                    'Enter the name of the main application repository that will receive the generated ALM4Dataverse pipeline files.',
+                    'This repo should represent your app or solution source, not the shared template repo.'
+                )
+                DocRelativePath = 'docs/setup/azdo-automated-setup.md'
+            },
+            [pscustomobject]@{
+                Kinds         = @('Text')
+                PromptPattern = '^Enter the name for the shared repository$'
+                Lines         = @(
+                    'Enter the name of the shared repository that will hold reusable ALM4Dataverse templates and shared pipeline assets.',
+                    'Keep it separate from the main app repo so you can reference the same shared assets from multiple repositories.'
+                )
+                DocRelativePath = 'docs/setup/azdo-automated-setup.md'
+            },
+            [pscustomobject]@{
+                Kinds         = @('YesNo')
+                PromptPattern = '^Use ALM4Dataverse AzDO extension\? \(required for Workload Identity Federation\)$'
+                Lines         = @(
+                    'Decide whether setup should generate pipelines that depend on the ALM4Dataverse Azure DevOps extension.',
+                    'Enable it if you want workload identity federation and the richer ALM4Dataverse task set; disable it only for the secret-based fallback path.'
+                )
+                DocRelativePath = 'docs/config/azdo-environment-service-connection.md'
+            },
+            [pscustomobject]@{
+                Kinds         = @('YesNo')
+                PromptPattern = "^Extension '.+' not found\. Install it\?$"
+                Lines         = @(
+                    'Confirm whether setup should install the missing Azure DevOps extension automatically.',
+                    'This usually requires organization-level permission, but it saves you from installing the dependency manually first.'
+                )
+                DocRelativePath = 'docs/setup/azdo-automated-setup.md'
+            },
+            [pscustomobject]@{
+                Kinds         = @('YesNo')
+                PromptPattern = "^Updates are available from upstream \(fast-forward\)\. Update '.+'\?$"
+                Lines         = @(
+                    'Confirm whether setup should fast-forward the selected shared-workflow fork to match upstream.',
+                    'Choose Yes when you want the reusable workflow repo aligned before generating references to it.'
+                )
+                DocRelativePath = 'docs/setup/github-setup.md'
+            },
+            [pscustomobject]@{
+                Kinds         = @('YesNo')
+                PromptPattern = "^Updates are available from the shared repo \(fast-forward\)\. Update '.+'\?$"
+                Lines         = @(
+                    'Confirm whether setup should fast-forward the selected shared repository so it matches the upstream ALM4Dataverse source.',
+                    'Choose Yes when you want the shared pipeline assets aligned before your main repo references them.'
+                )
+                DocRelativePath = 'docs/setup/azdo-automated-setup.md'
+            },
+            [pscustomobject]@{
+                Kinds         = @('YesNo')
+                PromptPattern = '^Are you sure this is the Secret Value\?$'
+                Lines         = @(
+                    'Confirm that you pasted the secret value itself rather than the secret ID, name, or description.',
+                    'This matters because the secret is hidden as you type and setup cannot tell whether you pasted the wrong field.'
+                )
+            },
+            [pscustomobject]@{
+                Kinds         = @('Secret')
+                PromptPattern = '^Client Secret$'
+                Lines         = @(
+                    'Paste the client secret value exactly as issued by Entra ID or your identity platform.',
+                    'This prompt hides what you type, so double-check you copied the secret value and not the secret identifier.'
+                )
+            }
+        )
+    
+        $matchedRule = $null
+        foreach ($rule in $guidanceRules) {
+            if ($rule.Kinds -notcontains $PromptKind) {
+                continue
+            }
+    
+            if ($PromptText -notmatch $rule.PromptPattern) {
+                continue
+            }
+    
+            if (
+                $rule.PSObject.Properties.Name -contains 'SectionPattern' -and
+                -not [string]::IsNullOrWhiteSpace($rule.SectionPattern) -and
+                ($currentSectionMessage -notmatch $rule.SectionPattern)
+            ) {
+                continue
+            }
+    
+            $matchedRule = $rule
+            break
+        }
+    
+        $fallbackLines = switch ($PromptKind) {
+            'Menu' {
+                @(
+                    'Choose the option that best matches what you want setup to do next.',
+                    'If you are unsure, prefer the safer or more reviewable option and keep the current default where one is shown.'
+                )
+            }
+            'Text' {
+                @(
+                    'Enter the requested value and press Enter to continue.',
+                    'If a default value is shown, you can accept it as-is or replace it with something more appropriate for your setup.'
+                )
+            }
+            'YesNo' {
+                @(
+                    'Confirm whether setup should continue with the action described below.',
+                    'Choose No if you want to keep the current state unchanged and review the step again.'
+                )
+            }
+            'Secret' {
+                @(
+                    'Enter the sensitive value requested for this step.',
+                    'The input is hidden while you type, so paste carefully and verify you copied the right field from the source system.'
+                )
+            }
+        }
+    
+        $effectiveDocRelativePath = $null
+        $effectiveRef = $null
+        $effectiveLinkLabel = 'Click for docs'
+    
+        if ($matchedRule -and $matchedRule.PSObject.Properties.Name -contains 'DocRelativePath' -and -not [string]::IsNullOrWhiteSpace($matchedRule.DocRelativePath)) {
+            $effectiveDocRelativePath = $matchedRule.DocRelativePath
+        }
+        elseif ($docContext -and -not [string]::IsNullOrWhiteSpace($docContext.DocRelativePath)) {
+            $effectiveDocRelativePath = $docContext.DocRelativePath
+            $effectiveRef = $docContext.Ref
+            if (-not [string]::IsNullOrWhiteSpace($docContext.LinkLabel)) {
+                $effectiveLinkLabel = $docContext.LinkLabel
+            }
+        }
+    
+        if ($matchedRule -and $matchedRule.PSObject.Properties.Name -contains 'Ref' -and -not [string]::IsNullOrWhiteSpace($matchedRule.Ref)) {
+            $effectiveRef = $matchedRule.Ref
+        }
+    
+        if ($matchedRule -and $matchedRule.PSObject.Properties.Name -contains 'LinkLabel' -and -not [string]::IsNullOrWhiteSpace($matchedRule.LinkLabel)) {
+            $effectiveLinkLabel = $matchedRule.LinkLabel
+        }
+    
+        return [pscustomobject]@{
+            Lines           = $(if ($matchedRule) { @($matchedRule.Lines) } else { $fallbackLines })
+            DocRelativePath = $effectiveDocRelativePath
+            Ref             = $effectiveRef
+            LinkLabel       = $effectiveLinkLabel
+        }
+    }
+    
+    function Show-SetupPromptGuidance {
+        [CmdletBinding()]
+        param(
+            [Parameter(Mandatory)][ValidateSet('Menu', 'Text', 'YesNo', 'Secret')][string]$PromptKind,
+            [Parameter(Mandatory)][string]$PromptText
+        )
+    
+        $guidance = Get-SetupPromptGuidance -PromptKind $PromptKind -PromptText $PromptText
+        if (-not $guidance) {
+            return
+        }
+    
+        $guidanceHeader = if ([string]::IsNullOrWhiteSpace($PromptText)) { 'Prompt guidance' } else { $PromptText }
+    
+        Write-SetupGuidance `
+            -Lines $guidance.Lines `
+            -DocRelativePath $guidance.DocRelativePath `
+            -Ref $guidance.Ref `
+            -LinkLabel $guidance.LinkLabel `
+            -Header $guidanceHeader `
+            -SkipContextUpdate
+    }
+    
+    function Get-SetupPromptInlineText {
+        [CmdletBinding()]
+        param(
+            [Parameter(Mandatory)][ValidateSet('Text', 'YesNo', 'Secret')][string]$PromptKind
+        )
+    
+        switch ($PromptKind) {
+            'Text' { return '[grey]>[/]' }
+            'YesNo' { return '[grey]>[/]' }
+            'Secret' { return '[grey]>[/]' }
+        }
+    }
+    
+    function Write-SetupConsoleBar {
+        [CmdletBinding()]
+        param(
+            [Parameter()][string]$Text,
+            [Parameter()][ConsoleColor]$ForegroundColor = [ConsoleColor]::Black,
+            [Parameter()][ConsoleColor]$BackgroundColor = [ConsoleColor]::Gray,
+            [Parameter()][int]$TargetRow = -1,
+            [Parameter()][switch]$RestoreCursorPosition,
+            [Parameter()][switch]$AdvanceCursor
+        )
+    
+        try {
+            $windowWidth = [Console]::WindowWidth
+            $windowHeight = [Console]::WindowHeight
+            if ($windowWidth -le 0 -or $windowHeight -le 0) {
+                return $false
+            }
+    
+            $resolvedRow = if ($TargetRow -lt 0) {
+                [Console]::CursorTop
+            }
+            else {
+                [Math]::Min($TargetRow, [Math]::Max($windowHeight - 1, 0))
+            }
+    
+            $barText = if ($null -eq $Text) { '' } else { [string]$Text }
+            $renderText = if ($barText.Length -ge $windowWidth) {
+                $barText.Substring(0, [Math]::Max($windowWidth - 1, 0))
+            }
+            else {
+                $barText.PadRight($windowWidth)
+            }
+    
+            $originalForeground = [Console]::ForegroundColor
+            $originalBackground = [Console]::BackgroundColor
+            $originalCursorLeft = [Console]::CursorLeft
+            $originalCursorTop = [Console]::CursorTop
+    
+            try {
+                [Console]::SetCursorPosition(0, $resolvedRow)
+                [Console]::ForegroundColor = $ForegroundColor
+                [Console]::BackgroundColor = $BackgroundColor
+                [Console]::Write($renderText)
+            }
+            finally {
+                [Console]::ForegroundColor = $originalForeground
+                [Console]::BackgroundColor = $originalBackground
+    
+                if ($RestoreCursorPosition) {
+                    $safeCursorTop = [Math]::Min($originalCursorTop, [Math]::Max([Console]::BufferHeight - 1, 0))
+                    $safeCursorLeft = [Math]::Min($originalCursorLeft, [Math]::Max([Console]::BufferWidth - 1, 0))
+                    [Console]::SetCursorPosition($safeCursorLeft, $safeCursorTop)
+                }
+                elseif ($AdvanceCursor) {
+                    $nextRow = [Math]::Min($resolvedRow + 1, [Math]::Max([Console]::BufferHeight - 1, 0))
+                    [Console]::SetCursorPosition(0, $nextRow)
+                }
+            }
+    
+            return $true
+        }
+        catch {
+            return $false
+        }
+    }
+    
+    function Show-SetupStatusBarAtBottom {
+        [CmdletBinding()]
+        param(
+            [Parameter()][ValidateSet('Menu', 'Text', 'YesNo', 'Secret')][string]$PromptKind = 'Text',
+            [Parameter()][switch]$SearchEnabled
+        )
+    
+        Initialize-SpectreConsole
+    
+        $segments = switch ($PromptKind) {
+            'Menu' {
+                @(
+                    'Up/Down=move',
+                    'Enter=select',
+                    $(if ($SearchEnabled) { 'Type=filter' } else { $null }),
+                    'Ctrl+C=exit'
+                )
+            }
+            'YesNo' {
+                @(
+                    'Y/N=choose',
+                    'Enter=confirm',
+                    'Ctrl+C=exit'
+                )
+            }
+            'Secret' {
+                @(
+                    'Enter=confirm',
+                    'Ctrl+C=exit'
+                )
+            }
+            default {
+                @(
+                    'Enter=confirm',
+                    'Ctrl+C=exit'
+                )
+            }
+        }
+    
+        $segments = @($segments | Where-Object { -not [string]::IsNullOrWhiteSpace($_) })
+        if ($segments.Count -eq 0) {
+            return
+        }
+    
+        $statusText = ($segments -join '  •  ')
+    
+        if (-not (Write-SetupConsoleBar -Text $statusText -ForegroundColor ([ConsoleColor]::Black) -BackgroundColor ([ConsoleColor]::Gray) -TargetRow ([Math]::Max([Console]::WindowHeight - 1, 0)) -RestoreCursorPosition)) {
+            $markup = '[black on grey]' + (($segments | ForEach-Object { ConvertTo-SpectreMarkupLiteral -Text $_ }) -join '  •  ') + '[/]'
+            [Spectre.Console.AnsiConsole]::MarkupLine($markup)
+        }
+    }
+    
+    function Clear-SetupStatusBarAtBottom {
+        [CmdletBinding()]
+        param()
+    
+        [void](Write-SetupConsoleBar -Text '' -TargetRow ([Math]::Max([Console]::WindowHeight - 1, 0)) -RestoreCursorPosition)
+    }
+    
+    function Add-SetupConsoleCancelHandler {
+        [CmdletBinding()]
+        param(
+            [Parameter(Mandatory)][System.ConsoleCancelEventHandler]$Handler
+        )
+    
+        try {
+            [System.Console]::add_CancelKeyPress($Handler)
+            return $true
+        }
+        catch {
+            try {
+                $cancelKeyPressEvent = [System.Console].GetEvent(
+                    'CancelKeyPress',
+                    [System.Reflection.BindingFlags]::Public -bor [System.Reflection.BindingFlags]::Static
+                )
+                if ($cancelKeyPressEvent) {
+                    $cancelKeyPressEvent.AddEventHandler($null, $Handler)
+                    return $true
+                }
+            }
+            catch {
+                # Some hosts do not expose a usable console cancel event. Continue without explicit Ctrl+C interception.
+            }
+        }
+    
+        return $false
+    }
+    
+    function Remove-SetupConsoleCancelHandler {
+        [CmdletBinding()]
+        param(
+            [Parameter(Mandatory)][System.ConsoleCancelEventHandler]$Handler
+        )
+    
+        try {
+            [System.Console]::remove_CancelKeyPress($Handler)
+            return
+        }
+        catch {
+            try {
+                $cancelKeyPressEvent = [System.Console].GetEvent(
+                    'CancelKeyPress',
+                    [System.Reflection.BindingFlags]::Public -bor [System.Reflection.BindingFlags]::Static
+                )
+                if ($cancelKeyPressEvent) {
+                    $cancelKeyPressEvent.RemoveEventHandler($null, $Handler)
+                }
+            }
+            catch {
+                # Ignore cleanup failures when the host does not support console cancel events.
+            }
+        }
+    }
+    
+    function Show-SelectionPromptWithInterruptHandling {
+        [CmdletBinding()]
+        param(
+            [Parameter(Mandatory)]$Prompt
+        )
+    
+        Initialize-SpectreConsole
+    
+        $cancellationTokenSource = [System.Threading.CancellationTokenSource]::new()
+        $cancellationState = [pscustomobject]@{
+            Cancelled           = $false
+            TokenSourceDisposed = $false
+        }
+    
+        $cancelHandler = [System.ConsoleCancelEventHandler]{
+            param($sender, $eventArgs)
+    
+            $eventArgs.Cancel = $true
+            $cancellationState.Cancelled = $true
+    
+            if (-not $cancellationState.TokenSourceDisposed -and -not $cancellationTokenSource.IsCancellationRequested) {
+                $cancellationTokenSource.Cancel()
+            }
+        }
+    
+        $handlerAttached = $false
+        try {
+            $handlerAttached = Add-SetupConsoleCancelHandler -Handler $cancelHandler
+    
+            return $Prompt.ShowAsync([Spectre.Console.AnsiConsole]::Console, $cancellationTokenSource.Token).GetAwaiter().GetResult()
+        }
+        catch {
+            if ($cancellationState.Cancelled -or (Test-IsUserInterruptException -Exception $_.Exception)) {
+                throw ([System.OperationCanceledException]::new('Setup cancelled by user.'))
+            }
+    
+            throw
+        }
+        finally {
+            if ($handlerAttached) {
+                try {
+                    Remove-SetupConsoleCancelHandler -Handler $cancelHandler
+                }
+                catch {
+                    # Ignore cleanup failures.
+                }
+            }
+    
+            $cancellationState.TokenSourceDisposed = $true
+            $cancellationTokenSource.Dispose()
+        }
+    }
+    
+    function Write-SetupPromptFrame {
+        [CmdletBinding()]
+        param(
+            [Parameter(Mandatory)][ValidateSet('Menu', 'Text', 'YesNo', 'Secret')][string]$PromptKind,
+            [Parameter(Mandatory)][string]$PromptText,
+            [Parameter()][switch]$PreserveExistingContent,
+            [Parameter()][switch]$SkipPromptGuidance
+        )
+    
+        Initialize-SpectreConsole
+    
+        $currentSectionMessage = Get-SetupCurrentSectionMessage
+        if (-not $PreserveExistingContent -and -not [string]::IsNullOrWhiteSpace($currentSectionMessage)) {
+            [Spectre.Console.AnsiConsole]::Clear()
+            Write-SetupDashboard -Message $currentSectionMessage
+            [Spectre.Console.AnsiConsole]::WriteLine()
+        }
+    
+        if (-not $SkipPromptGuidance) {
+            Show-SetupPromptGuidance -PromptKind $PromptKind -PromptText $PromptText
+        }
+    }
+    
+    function Wait-ForUserAcknowledgement {
+        [CmdletBinding()]
+        param(
+            [Parameter(Mandatory)][string]$Message,
+            [Parameter()][string]$ContinueLabel = 'Continue'
+        )
+    
+        $choice = Select-FromMenu -Title $Message -Items @($ContinueLabel, 'Cancel setup')
+        if ($choice -ne 0) {
+            throw 'Setup cancelled by user.'
+        }
+    }
+    
+    function Read-SecretText {
+        [CmdletBinding()]
+        param(
+            [Parameter(Mandatory)][string]$Prompt,
+            [Parameter()][switch]$AllowEmpty
+        )
+    
+        Initialize-SpectreConsole
+    
+        while ($true) {
+            Write-SetupPromptFrame -PromptKind 'Secret' -PromptText $Prompt
+            Show-SetupStatusBarAtBottom -PromptKind 'Secret'
+            $textPrompt = [Spectre.Console.TextPrompt[string]]::new((Get-SetupPromptInlineText -PromptKind 'Secret'))
+            $textPrompt.IsSecret = $true
+            if ($AllowEmpty) {
+                $textPrompt.AllowEmpty = $true
+            }
+    
+            try {
+                $value = $textPrompt.Show([Spectre.Console.AnsiConsole]::Console)
+            }
+            finally {
+                Clear-SetupStatusBarAtBottom
+            }
+    
+            if ([string]::IsNullOrWhiteSpace($value)) {
+                if ($AllowEmpty) {
+                    return ''
+                }
+    
+                [Spectre.Console.AnsiConsole]::MarkupLine('[red]A value is required. Please try again.[/]')
+                continue
+            }
+    
+            return $value
+        }
+    }
+    
+    function Write-Section {
+        param([Parameter(Mandatory)][string]$Message)
+    
+        Initialize-SpectreConsole
+        $script:SetupCurrentSectionMessage = $Message
+        Clear-SetupPromptDocContext
+        [Spectre.Console.AnsiConsole]::Clear()
+        Write-SetupDashboard -Message $Message
+    }
+    
     function Select-FromMenu {
         <#
         .SYNOPSIS
-            Simple interactive console menu selection using PSMenu.
+            Interactive console menu selection using Spectre.Console.
     
         .DESCRIPTION
-            Arrow keys to move, Enter to select, Esc to cancel.
-    
-            This function wraps the PSMenu module's Show-Menu function.
+            Arrow keys move, Enter selects, and search is enabled automatically for long lists.
         #>
     
         [CmdletBinding()]
         param(
             [Parameter(Mandatory)][string]$Title,
-            [Parameter(Mandatory)][string[]]$Items
+            [Parameter(Mandatory)][string[]]$Items,
+            [Parameter()][switch]$PreserveExistingContent,
+            [Parameter()][switch]$SkipPromptGuidance
         )
     
         if ($Items.Count -eq 0) { return $null }
     
-        Write-Host $Title -ForegroundColor Green
-        Write-Host ""
+        Initialize-SpectreConsole
     
-        $selectedIndex = Show-Menu -MenuItems $Items -ReturnIndex
-        return $selectedIndex
+        $originalTreatControlCAsInput = $null
+        $canRestoreTreatControlCAsInput = $false
+        try {
+            $originalTreatControlCAsInput = [Console]::TreatControlCAsInput
+            [Console]::TreatControlCAsInput = $false
+            $canRestoreTreatControlCAsInput = $true
+        }
+        catch {
+            $canRestoreTreatControlCAsInput = $false
+        }
+    
+        Write-SetupPromptFrame -PromptKind 'Menu' -PromptText $Title -PreserveExistingContent:$PreserveExistingContent -SkipPromptGuidance:$SkipPromptGuidance
+    
+        $effectiveItems = @($Items)
+        $wizardContext = Get-SetupWizardContext
+        $hasGenericBack = $false
+        if (
+            $wizardContext -and
+            $wizardContext.CurrentStepIndex -gt 0 -and
+            -not ($effectiveItems -contains 'Back') -and
+            -not ($effectiveItems -contains '< Back to previous step')
+        ) {
+            $effectiveItems += '< Back to previous step'
+            $hasGenericBack = $true
+        }
+    
+        $prompt = [Spectre.Console.SelectionPrompt[string]]::new()
+        $prompt.MoreChoicesText = ''
+        $prompt.WrapAround = $true
+    
+        $availableMenuRows = 10
+        try {
+            $windowTop = [Console]::WindowTop
+            $windowHeight = [Console]::WindowHeight
+            $cursorTop = [Console]::CursorTop
+            $visibleWindowBottom = $windowTop + [Math]::Max($windowHeight, 1)
+            $reservedRows = 4
+            $availableMenuRows = [Math]::Max($visibleWindowBottom - $cursorTop - $reservedRows, 1)
+        }
+        catch {
+            $availableMenuRows = 10
+        }
+    
+        $prompt.PageSize = [Math]::Min([Math]::Max($effectiveItems.Count, 1), $availableMenuRows)
+    
+        if ($effectiveItems.Count -gt 8) {
+            $prompt.SearchEnabled = $true
+            $prompt.SearchPlaceholderText = '[grey]Start typing to filter options[/]'
+        }
+    
+        foreach ($item in $effectiveItems) {
+            [void]$prompt.AddChoice($item)
+        }
+    
+        Show-SetupStatusBarAtBottom -PromptKind 'Menu' -SearchEnabled:$prompt.SearchEnabled
+    
+        try {
+            $selectedValue = Show-SelectionPromptWithInterruptHandling -Prompt $prompt
+            $isBackSelection = ($selectedValue -eq 'Back' -or $selectedValue -like '< Back*')
+            if ($isBackSelection -and ($effectiveItems -contains '< Back to previous step' -or $effectiveItems -contains 'Back')) {
+                Request-SetupWizardBack
+            }
+    
+            if ($null -eq $selectedValue) {
+                return $null
+            }
+    
+            for ($itemIndex = 0; $itemIndex -lt $Items.Count; $itemIndex++) {
+                if ($Items[$itemIndex] -ceq $selectedValue) {
+                    return $itemIndex
+                }
+            }
+    
+            return [Array]::IndexOf($Items, $selectedValue)
+        }
+        finally {
+            Clear-SetupStatusBarAtBottom
+    
+            if ($canRestoreTreatControlCAsInput) {
+                try {
+                    [Console]::TreatControlCAsInput = $originalTreatControlCAsInput
+                }
+                catch {
+                    # Ignore cleanup failures.
+                }
+            }
+        }
     }
     
     function Read-YesNo {
@@ -93,12 +1641,15 @@ else {
             [Parameter()][switch]$DefaultNo
         )
     
-        $suffix = if ($DefaultNo) { ' [y/N]' } else { ' [Y/n]' }
-        $answer = Read-Host ($Prompt + $suffix)
-        if ([string]::IsNullOrWhiteSpace($answer)) {
-            return (-not $DefaultNo)
+        Initialize-SpectreConsole
+        Write-SetupPromptFrame -PromptKind 'YesNo' -PromptText $Prompt
+        Show-SetupStatusBarAtBottom -PromptKind 'YesNo'
+        try {
+            return [Spectre.Console.AnsiConsole]::Confirm((Get-SetupPromptInlineText -PromptKind 'YesNo'), (-not $DefaultNo))
         }
-        return ($answer.Trim().ToLowerInvariant() -in @('y', 'yes'))
+        finally {
+            Clear-SetupStatusBarAtBottom
+        }
     }
     
     function ConvertFrom-GitRefToBranchName {
@@ -235,27 +1786,111 @@ else {
         return "https://github.com/ALM4Dataverse/ALM4Dataverse/tree/$effectiveRef/$normalizedPath"
     }
     
+    function Get-SetupGuidanceHeaderMarkup {
+        [CmdletBinding()]
+        param(
+            [Parameter()][string]$Header = 'What this step covers',
+            [Parameter()][string]$DocUrl,
+            [Parameter()][string]$LinkLabel = 'Click for docs'
+        )
+    
+        Initialize-SpectreConsole
+    
+        $leftMarkup = "[bold]$(ConvertTo-SpectreMarkupLiteral -Text $Header)[/]"
+        return $leftMarkup
+    }
+    
+    function Write-SetupPanelBottomBorderOverlay {
+        [CmdletBinding()]
+        param(
+            [Parameter()][string]$VisibleText,
+            [Parameter()][string]$MarkupText,
+            [Parameter(Mandatory)][int]$PanelWriteStartTop
+        )
+    
+        if ([string]::IsNullOrWhiteSpace($VisibleText) -or [string]::IsNullOrWhiteSpace($MarkupText)) {
+            return
+        }
+    
+        try {
+            $savedLeft = [Console]::CursorLeft
+            $savedTop = [Console]::CursorTop
+            $windowWidth = [Console]::WindowWidth
+    
+            if ($windowWidth -le 0) {
+                return
+            }
+    
+            $overlayRow = if ($savedLeft -eq 0 -and $savedTop -gt $PanelWriteStartTop) {
+                $savedTop - 1
+            }
+            else {
+                $savedTop
+            }
+    
+            $overlayColumn = [Math]::Max($windowWidth - $VisibleText.Length - 2, 1)
+            [Console]::SetCursorPosition($overlayColumn, $overlayRow)
+            [Spectre.Console.AnsiConsole]::Write([Spectre.Console.Markup]::new($MarkupText))
+            [Console]::SetCursorPosition($savedLeft, $savedTop)
+        }
+        catch {
+            # Ignore overlay failures in hosts that do not expose reliable cursor positioning.
+        }
+    }
+    
     function Write-SetupGuidance {
         [CmdletBinding()]
         param(
             [Parameter()][string[]]$Lines,
             [Parameter()][string]$DocRelativePath,
             [Parameter()][string]$Ref,
-            [Parameter()][string]$LinkLabel = 'Full docs'
+            [Parameter()][string]$LinkLabel = 'Full docs',
+            [Parameter()][string]$Header = 'What this step covers',
+            [Parameter()][switch]$SkipContextUpdate
         )
     
+        Initialize-SpectreConsole
+    
+        if (-not $SkipContextUpdate) {
+            Set-SetupPromptDocContext -DocRelativePath $DocRelativePath -Ref $Ref -LinkLabel $LinkLabel
+        }
+    
+        $contentLines = @()
         foreach ($line in @($Lines)) {
             if (-not [string]::IsNullOrWhiteSpace($line)) {
-                Write-Host $line -ForegroundColor Green
+                $contentLines += "• $(ConvertTo-SpectreMarkupLiteral -Text $line)"
             }
         }
     
+        $docUrl = $null
         if (-not [string]::IsNullOrWhiteSpace($DocRelativePath)) {
             $docUrl = Get-Alm4DataverseDocUrl -RelativePath $DocRelativePath -Ref $Ref
-            Write-Host "${LinkLabel}: $docUrl" -ForegroundColor Green
         }
     
-        Write-Host ""
+        if ($contentLines.Count -eq 0 -and [string]::IsNullOrWhiteSpace($docUrl)) {
+            return
+        }
+    
+        $panelContentText = if ($contentLines.Count -gt 0) { $contentLines -join [Environment]::NewLine } else { '[grey][/]' }
+        $panelHeaderMarkup = Get-SetupGuidanceHeaderMarkup -Header $Header -DocUrl $docUrl -LinkLabel $LinkLabel
+        $panelWriteStartTop = 0
+        try {
+            $panelWriteStartTop = [Console]::CursorTop
+        }
+        catch {
+            $panelWriteStartTop = 0
+        }
+    
+        [Spectre.Console.AnsiConsole]::Write((New-SpectrePanel -Content ([Spectre.Console.Markup]::new($panelContentText)) -HeaderMarkup $panelHeaderMarkup -BorderColor 'springgreen3' -Expand))
+    
+        if (-not [string]::IsNullOrWhiteSpace($docUrl)) {
+            $overlayLabelText = if ([string]::IsNullOrWhiteSpace($LinkLabel)) { 'Click for docs' } else { $LinkLabel }
+            $overlayVisibleText = " $overlayLabelText "
+            $overlayMarkup = "[grey][link=$docUrl]$(ConvertTo-SpectreMarkupLiteral -Text $overlayVisibleText)[/][/]"
+            Write-SetupPanelBottomBorderOverlay -VisibleText $overlayVisibleText -MarkupText $overlayMarkup -PanelWriteStartTop $panelWriteStartTop
+        }
+    
+        [Spectre.Console.AnsiConsole]::WriteLine()
     }
     
     function Read-TextWithDefault {
@@ -266,13 +1901,35 @@ else {
             [Parameter()][switch]$AllowEmpty
         )
     
+        Initialize-SpectreConsole
+    
         while ($true) {
-            $displayPrompt = $Prompt
+            $value = $null
+            Write-SetupPromptFrame -PromptKind 'Text' -PromptText $Prompt
             if (-not [string]::IsNullOrWhiteSpace($DefaultValue)) {
-                $displayPrompt = "$Prompt [$DefaultValue]"
+                Show-SetupStatusBarAtBottom -PromptKind 'Text'
+                try {
+                    $value = [Spectre.Console.AnsiConsole]::Ask[string]((Get-SetupPromptInlineText -PromptKind 'Text'), $DefaultValue)
+                }
+                finally {
+                    Clear-SetupStatusBarAtBottom
+                }
+            }
+            else {
+                Show-SetupStatusBarAtBottom -PromptKind 'Text'
+                $textPrompt = [Spectre.Console.TextPrompt[string]]::new((Get-SetupPromptInlineText -PromptKind 'Text'))
+                if ($AllowEmpty) {
+                    $textPrompt.AllowEmpty = $true
+                }
+    
+                try {
+                    $value = $textPrompt.Show([Spectre.Console.AnsiConsole]::Console)
+                }
+                finally {
+                    Clear-SetupStatusBarAtBottom
+                }
             }
     
-            $value = Read-Host $displayPrompt
             if ([string]::IsNullOrWhiteSpace($value)) {
                 if (-not [string]::IsNullOrWhiteSpace($DefaultValue)) {
                     return $DefaultValue
@@ -281,7 +1938,7 @@ else {
                     return ''
                 }
     
-                Write-Warning "A value is required. Please try again."
+                [Spectre.Console.AnsiConsole]::MarkupLine('[red]A value is required. Please try again.[/]')
                 continue
             }
     
@@ -426,28 +2083,32 @@ else {
             [Parameter()][array]$EnvironmentConfigurations
         )
     
+        Initialize-SpectreConsole
+    
         $items = @($EnvironmentConfigurations)
         if ($items.Count -eq 0) {
-            Write-Host 'No environments selected.' -ForegroundColor DarkGray
+            [Spectre.Console.AnsiConsole]::MarkupLine('[grey]No environments selected yet.[/]')
             return
         }
     
-        $rows = foreach ($env in $items) {
+        [Spectre.Console.AnsiConsole]::MarkupLine('[bold yellow]Environment plan[/]')
+        $table = New-SpectreTable -Columns @('Short name', 'Friendly name', 'Dataverse URL', 'Credential', 'Service account')
+        foreach ($env in $items) {
             $serviceAccountUPN = ''
             if ($env.PSObject.Properties.Name -contains 'ServiceAccountUPN' -and -not [string]::IsNullOrWhiteSpace($env.ServiceAccountUPN)) {
                 $serviceAccountUPN = [string]$env.ServiceAccountUPN
             }
     
-            [pscustomobject]@{
-                ShortName      = [string]$env.ShortName
-                FriendlyName   = [string]$env.FriendlyName
-                Url            = [string]$env.Url
-                Credential     = Get-CredentialSummaryText -Credentials $env.Credentials
-                ServiceAccount = $serviceAccountUPN
-            }
+            Add-SpectreTableRow -Table $table -Cells @(
+                [string]$env.ShortName,
+                [string]$env.FriendlyName,
+                [string]$env.Url,
+                (Get-CredentialSummaryText -Credentials $env.Credentials),
+                $serviceAccountUPN
+            )
         }
     
-        $rows | Format-Table -Property ShortName, FriendlyName, Url, Credential, ServiceAccount -Wrap -AutoSize | Out-Host
+        [Spectre.Console.AnsiConsole]::Write($table)
     }
     
     function Select-OrderedSolutions {
@@ -463,26 +2124,45 @@ else {
         }
     
         while ($true) {
-            Clear-Host
-            Write-Host 'Solutions Configuration' -ForegroundColor Cyan
-            Write-Host '=======================' -ForegroundColor Cyan
-            Write-Host ''
+            Write-Section 'Configure solution order'
+            Show-SetupPromptGuidance -PromptKind 'Menu' -PromptText 'Manage solutions'
     
             if ($selectedSolutions.Count -eq 0) {
-                Write-Host 'No solutions selected.' -ForegroundColor DarkGray
+                [Spectre.Console.AnsiConsole]::MarkupLine('[grey]No solutions selected yet.[/]')
             }
             else {
-                Write-Host 'Selected solutions (in dependency order):' -ForegroundColor Green
-                $selectedSolutions | Select-Object @{ N = 'Friendly Name'; E = { $_.friendlyname } }, @{ N = 'Unique Name'; E = { $_.uniquename } }, Version | Format-Table -AutoSize | Out-Host
-            }
-            Write-Host ''
+                [Spectre.Console.AnsiConsole]::MarkupLine('[bold green]Selected solutions (dependency order)[/]')
+                $table = New-SpectreTable -Columns @('#', 'Friendly name', 'Unique name', 'Version')
+                for ($solutionIndex = 0; $solutionIndex -lt $selectedSolutions.Count; $solutionIndex++) {
+                    $solution = $selectedSolutions[$solutionIndex]
+                    Add-SpectreTableRow -Table $table -Cells @(
+                        [string]($solutionIndex + 1),
+                        [string]$solution.friendlyname,
+                        [string]$solution.uniquename,
+                        [string]$solution.version
+                    )
+                }
     
-            $menuItems = @('Add a solution', 'Clear list')
+                [Spectre.Console.AnsiConsole]::Write($table)
+            }
+    
+            [Spectre.Console.AnsiConsole]::WriteLine()
+    
+            $menuItems = @('Add a solution')
             if ($selectedSolutions.Count -gt 0) {
+                $menuItems += 'Remove a solution'
+                if ($selectedSolutions.Count -gt 1) {
+                    $menuItems += 'Move a solution earlier'
+                    $menuItems += 'Move a solution later'
+                }
+                $menuItems += 'Clear list'
+                $menuItems += 'Done'
+            }
+            else {
                 $menuItems += 'Done'
             }
     
-            $selection = Select-FromMenu -Title 'Manage solutions' -Items $menuItems
+            $selection = Select-FromMenu -Title 'Manage solutions' -Items $menuItems -PreserveExistingContent -SkipPromptGuidance
     
             if ($null -eq $selection) {
                 return @($selectedSolutions)
@@ -496,23 +2176,51 @@ else {
                     })
     
                     if ($available.Count -eq 0) {
-                        Write-Host 'All solutions already selected.' -ForegroundColor Yellow
-                        Start-Sleep -Seconds 2
+                        [Spectre.Console.AnsiConsole]::MarkupLine('[yellow]All available solutions are already selected.[/]')
                         continue
                     }
     
                     $solMenu = @($available | ForEach-Object { "$($_.friendlyname) ($($_.uniquename))" })
-                    $solMenu += '--- Cancel ---'
     
                     $solIndex = Select-FromMenu -Title 'Select a solution to add' -Items $solMenu
                     if ($null -ne $solIndex -and $solIndex -lt $available.Count) {
                         $selectedSolutions += $available[$solIndex]
                     }
                 }
+                'Remove a solution' {
+                    $solMenu = @($selectedSolutions | ForEach-Object { "$($_.friendlyname) ($($_.uniquename))" })
+                    $solIndex = Select-FromMenu -Title 'Select a solution to remove' -Items $solMenu
+                    if ($null -ne $solIndex -and $solIndex -lt $selectedSolutions.Count) {
+                        $selectedSolutions = @(
+                            for ($selectedIndex = 0; $selectedIndex -lt $selectedSolutions.Count; $selectedIndex++) {
+                                if ($selectedIndex -ne $solIndex) {
+                                    $selectedSolutions[$selectedIndex]
+                                }
+                            }
+                        )
+                    }
+                }
+                'Move a solution earlier' {
+                    $solMenu = @($selectedSolutions | ForEach-Object { "$($_.friendlyname) ($($_.uniquename))" })
+                    $solIndex = Select-FromMenu -Title 'Select a solution to move earlier' -Items $solMenu
+                    if ($null -ne $solIndex -and $solIndex -gt 0) {
+                        $temp = $selectedSolutions[$solIndex - 1]
+                        $selectedSolutions[$solIndex - 1] = $selectedSolutions[$solIndex]
+                        $selectedSolutions[$solIndex] = $temp
+                    }
+                }
+                'Move a solution later' {
+                    $solMenu = @($selectedSolutions | ForEach-Object { "$($_.friendlyname) ($($_.uniquename))" })
+                    $solIndex = Select-FromMenu -Title 'Select a solution to move later' -Items $solMenu
+                    if ($null -ne $solIndex -and $solIndex -lt ($selectedSolutions.Count - 1)) {
+                        $temp = $selectedSolutions[$solIndex + 1]
+                        $selectedSolutions[$solIndex + 1] = $selectedSolutions[$solIndex]
+                        $selectedSolutions[$solIndex] = $temp
+                    }
+                }
                 'Clear list' {
                     $selectedSolutions = @()
-                    Write-Host 'List cleared.' -ForegroundColor Yellow
-                    Start-Sleep -Seconds 1
+                    [Spectre.Console.AnsiConsole]::MarkupLine('[yellow]Solution list cleared.[/]')
                 }
                 'Done' {
                     return @($selectedSolutions)
@@ -623,27 +2331,35 @@ else {
         }
     
         while ($true) {
-            Clear-Host
-            Write-Host $Heading -ForegroundColor Cyan
-            Write-Host ('=' * $Heading.Length) -ForegroundColor Cyan
-            Write-Host ''
+            Write-Section $Heading
     
+            $guidanceShown = $false
             if ($GuidanceLines -or $DocRelativePath) {
                 Write-SetupGuidance -Lines $GuidanceLines -DocRelativePath $DocRelativePath -Ref $Ref
+                $guidanceShown = $true
+            }
+    
+            if (-not $guidanceShown) {
+                Show-SetupPromptGuidance -PromptKind 'Menu' -PromptText $Title
             }
     
             Show-EnvironmentConfigurationTable -EnvironmentConfigurations $selectedEnvironments
-            Write-Host ''
+            [Spectre.Console.AnsiConsole]::WriteLine()
     
-            $menuItems = @('Add an environment', 'Clear list')
+            $menuItems = @('Add an environment')
             if ($selectedEnvironments.Count -gt 0) {
                 if ($EditEnvironmentScriptBlock) {
                     $menuItems += 'Edit an environment'
                 }
+                $menuItems += 'Remove an environment'
+                $menuItems += 'Clear list'
+                $menuItems += 'Done'
+            }
+            else {
                 $menuItems += 'Done'
             }
     
-            $selection = Select-FromMenu -Title $Title -Items $menuItems
+            $selection = Select-FromMenu -Title $Title -Items $menuItems -PreserveExistingContent -SkipPromptGuidance
             if ($null -eq $selection) {
                 return @($selectedEnvironments)
             }
@@ -655,10 +2371,30 @@ else {
                         $selectedEnvironments += $newEnvironment
                     }
                 }
+                'Remove an environment' {
+                    $environmentMenuItems = @()
+                    for ($i = 0; $i -lt $selectedEnvironments.Count; $i++) {
+                        $environment = $selectedEnvironments[$i]
+                        $shortName = [string]$environment.ShortName
+                        $friendlyName = if ([string]::IsNullOrWhiteSpace($environment.FriendlyName)) { $shortName } else { [string]$environment.FriendlyName }
+                        $url = if ([string]::IsNullOrWhiteSpace($environment.Url)) { '<not set>' } else { [string]$environment.Url }
+                        $environmentMenuItems += "$shortName - $friendlyName ($url)"
+                    }
+    
+                    $removeSelection = Select-FromMenu -Title 'Select the environment to remove' -Items $environmentMenuItems
+                    if ($null -ne $removeSelection) {
+                        $selectedEnvironments = @(
+                            for ($selectedIndex = 0; $selectedIndex -lt $selectedEnvironments.Count; $selectedIndex++) {
+                                if ($selectedIndex -ne $removeSelection) {
+                                    $selectedEnvironments[$selectedIndex]
+                                }
+                            }
+                        )
+                    }
+                }
                 'Clear list' {
                     $selectedEnvironments = @()
-                    Write-Host 'List cleared.' -ForegroundColor Yellow
-                    Start-Sleep -Seconds 1
+                    [Spectre.Console.AnsiConsole]::MarkupLine('[yellow]Environment list cleared.[/]')
                 }
                 'Edit an environment' {
                     $environmentMenuItems = @()
@@ -794,37 +2530,193 @@ else {
         return $FallbackRef
     }
     
+    function ConvertTo-SetupActivityOutputLine {
+        [CmdletBinding()]
+        param(
+            [Parameter()][AllowNull()]$Entry
+        )
+    
+        if ($null -eq $Entry) {
+            return $null
+        }
+    
+        $style = 'white'
+        $text = $null
+    
+        if ($Entry -is [System.Management.Automation.InformationRecord]) {
+            $text = [string]$Entry.MessageData
+            $style = 'grey'
+        }
+        elseif ($Entry -is [System.Management.Automation.WarningRecord]) {
+            $text = [string]$Entry.Message
+            $style = 'yellow'
+        }
+        elseif ($Entry -is [System.Management.Automation.VerboseRecord]) {
+            $text = [string]$Entry.Message
+            $style = 'deepskyblue1'
+        }
+        elseif ($Entry -is [System.Management.Automation.DebugRecord]) {
+            $text = [string]$Entry.Message
+            $style = 'mediumpurple3'
+        }
+        elseif ($Entry -is [System.Management.Automation.ErrorRecord]) {
+            $text = [string]$Entry.ToString()
+            $style = 'red3_1'
+        }
+        else {
+            $text = [string]$Entry
+        }
+    
+        if ([string]::IsNullOrWhiteSpace($text)) {
+            return $null
+        }
+    
+        return "[$style]$(ConvertTo-SpectreMarkupLiteral -Text $text.Trim())[/]"
+    }
+    
+    function Show-SetupActivityOutputPanel {
+        [CmdletBinding()]
+        param(
+            [Parameter(Mandatory)][string]$Heading,
+            [Parameter()][string[]]$Lines,
+            [Parameter()][int]$MaxLines = 12
+        )
+    
+        Initialize-SpectreConsole
+    
+        $effectiveLines = @($Lines | Where-Object { -not [string]::IsNullOrWhiteSpace($_) })
+        if ($effectiveLines.Count -eq 0) {
+            $effectiveLines = @('[grey]No additional output was produced for this action.[/]')
+        }
+        elseif ($effectiveLines.Count -gt $MaxLines) {
+            $hiddenCount = $effectiveLines.Count - $MaxLines
+            $effectiveLines = @("[grey]... $hiddenCount earlier line(s) omitted ...[/]") + $effectiveLines[($effectiveLines.Count - $MaxLines)..($effectiveLines.Count - 1)]
+        }
+    
+        $content = [Spectre.Console.Markup]::new(($effectiveLines -join [Environment]::NewLine))
+        [Spectre.Console.AnsiConsole]::Write((New-SpectrePanel -Content $content -Header $Heading -BorderColor 'grey42' -Expand))
+        [Spectre.Console.AnsiConsole]::WriteLine()
+    }
+    
+    function Invoke-WithSpectreStatus {
+        [CmdletBinding()]
+        param(
+            [Parameter(Mandatory)][string]$Status,
+            [Parameter(Mandatory)][scriptblock]$ScriptBlock,
+            [Parameter()][switch]$CaptureOutputInPanel
+        )
+    
+        Initialize-SpectreConsole
+    
+        try {
+            $statusDisplay = [Spectre.Console.AnsiConsole]::Status()
+            $statusDisplay.AutoRefresh = $true
+            $statusDisplay.SpinnerStyle = [Spectre.Console.Style]::Parse('bold deepskyblue1')
+    
+            if (-not $CaptureOutputInPanel) {
+                return $statusDisplay.Start(
+                    "[bold deepskyblue1]$(ConvertTo-SpectreMarkupLiteral -Text $Status)[/]",
+                    [System.Func[Spectre.Console.StatusContext, object]]{
+                        param($context)
+                        & $ScriptBlock $context
+                    }
+                )
+            }
+    
+            $capturedLines = [System.Collections.Generic.List[string]]::new()
+    
+            $result = $statusDisplay.Start(
+                "[bold deepskyblue1]$(ConvertTo-SpectreMarkupLiteral -Text $Status)[/]",
+                [System.Func[Spectre.Console.StatusContext, object]]{
+                    param($context)
+    
+                    $capturedOutput = @(& { & $ScriptBlock $context } 6>&1 5>&1 4>&1 3>&1 2>&1)
+                    $capturedResult = $null
+                    foreach ($entry in $capturedOutput) {
+                        if (
+                            $entry -is [System.Management.Automation.InformationRecord] -or
+                            $entry -is [System.Management.Automation.WarningRecord] -or
+                            $entry -is [System.Management.Automation.VerboseRecord] -or
+                            $entry -is [System.Management.Automation.DebugRecord] -or
+                            $entry -is [System.Management.Automation.ErrorRecord] -or
+                            $entry -is [string]
+                        ) {
+                            $line = ConvertTo-SetupActivityOutputLine -Entry $entry
+                            if (-not [string]::IsNullOrWhiteSpace($line)) {
+                                $capturedLines.Add($line)
+                            }
+                        }
+                        else {
+                            $capturedResult = $entry
+                        }
+                    }
+    
+                    return $capturedResult
+                }
+            )
+    
+            Show-SetupActivityOutputPanel -Heading $Status -Lines $capturedLines
+            return $result
+        }
+        catch {
+            if (Test-IsSetupWizardBackException -Exception $_.Exception) {
+                throw
+            }
+    
+            if (Test-IsUserInterruptException -Exception $_.Exception) {
+                throw
+            }
+    
+            return & $ScriptBlock $null
+        }
+    }
+    
     function Invoke-WithErrorHandling {
         [CmdletBinding()]
         param(
             [Parameter(Mandatory)][scriptblock]$ScriptBlock,
             [Parameter(Mandatory)][string]$OperationName,
-            [Parameter()][switch]$AllowSkip
+            [Parameter()][switch]$AllowSkip,
+            [Parameter()][string]$StatusMessage,
+            [Parameter()][switch]$CaptureOutputInPanel
         )
     
         while ($true) {
             try {
-                return & $ScriptBlock
+                if ([string]::IsNullOrWhiteSpace($StatusMessage)) {
+                    return & $ScriptBlock
+                }
+    
+                return Invoke-WithSpectreStatus -Status $StatusMessage -ScriptBlock $ScriptBlock -CaptureOutputInPanel:$CaptureOutputInPanel
             }
             catch {
-                Write-Host "`n" -NoNewline
-                Write-Host "ERROR in $OperationName" -ForegroundColor Red -BackgroundColor Black
-                Write-Host "="*80 -ForegroundColor Red
-                Write-Host "Error Type: $($_.Exception.GetType().Name)" -ForegroundColor Yellow
-                Write-Host "Error Message: $($_.Exception.Message)" -ForegroundColor Yellow
-    
-                if ($_.ScriptStackTrace) {
-                    Write-Host "`nStack Trace:" -ForegroundColor DarkGray
-                    Write-Host $_.ScriptStackTrace -ForegroundColor DarkGray
+                if (Test-IsSetupWizardBackException -Exception $_.Exception) {
+                    throw
                 }
+    
+                if (Test-IsUserInterruptException -Exception $_.Exception) {
+                    throw
+                }
+    
+                Initialize-SpectreConsole
+    
+                $errorLines = @(
+                    "[bold red]ERROR in $(ConvertTo-SpectreMarkupLiteral -Text $OperationName)[/]",
+                    "[yellow]Error Type:[/] $(ConvertTo-SpectreMarkupLiteral -Text $_.Exception.GetType().Name)",
+                    "[yellow]Error Message:[/] $(ConvertTo-SpectreMarkupLiteral -Text $_.Exception.Message)"
+                )
     
                 if ($_.InvocationInfo.PositionMessage) {
-                    Write-Host "`nLocation:" -ForegroundColor DarkGray
-                    Write-Host $_.InvocationInfo.PositionMessage -ForegroundColor DarkGray
+                    $errorLines += "[grey]Location:[/] $(ConvertTo-SpectreMarkupLiteral -Text $_.InvocationInfo.PositionMessage.Trim())"
                 }
     
-                Write-Host "="*80 -ForegroundColor Red
-                Write-Host ""
+                if ($_.ScriptStackTrace) {
+                    $errorLines += "[grey]Stack Trace:[/] $(ConvertTo-SpectreMarkupLiteral -Text $_.ScriptStackTrace.Trim())"
+                }
+    
+                [Spectre.Console.AnsiConsole]::WriteLine()
+                [Spectre.Console.AnsiConsole]::Write((New-SpectrePanel -Content ([Spectre.Console.Markup]::new(($errorLines -join [Environment]::NewLine))) -Header 'Setup error' -BorderColor 'red3_1' -Expand -PaddingY 1))
+                [Spectre.Console.AnsiConsole]::WriteLine()
     
                 $options = @('Retry')
                 if ($AllowSkip) {
@@ -832,7 +2724,7 @@ else {
                 }
                 $options += 'Abort Setup'
     
-                $choice = Select-FromMenu -Title "How would you like to proceed?" -Items $options
+                $choice = Select-FromMenu -Title "How would you like to proceed?" -Items $options -PreserveExistingContent
     
                 if ($null -eq $choice) {
                     Write-Host "Setup aborted by user." -ForegroundColor Yellow
@@ -841,6 +2733,8 @@ else {
     
                 switch ($options[$choice]) {
                     'Retry' {
+                        Initialize-SpectreConsole
+                        [Spectre.Console.AnsiConsole]::Clear()
                         Write-Host "Retrying $OperationName..." -ForegroundColor Cyan
                         continue
                     }
@@ -854,6 +2748,94 @@ else {
                     }
                 }
             }
+        }
+    }
+    
+    function Show-SetupCompletionScreen {
+        [CmdletBinding()]
+        param(
+            [Parameter(Mandatory)][string]$Heading,
+            [Parameter(Mandatory)][string]$AccessLabel,
+            [Parameter(Mandatory)][string]$AccessUrl,
+            [Parameter()][array]$MetricCards,
+            [Parameter()][hashtable]$SummaryValues,
+            [Parameter()][array]$NextStepLinks,
+            [Parameter()][string[]]$Notes
+        )
+    
+        Initialize-SpectreConsole
+        [Spectre.Console.AnsiConsole]::Clear()
+    
+        Write-SetupDashboard -Message $Heading -IncludeTrailingSpacer
+
+        if ($SummaryValues -and $SummaryValues.Count -gt 0) {
+            [Spectre.Console.AnsiConsole]::Write((New-SpectrePanel -Content (New-SpectreInfoGrid -Values $SummaryValues -LabelWidth 18) -Header 'Result summary' -BorderColor 'deepskyblue1' -Expand))
+            [Spectre.Console.AnsiConsole]::WriteLine()
+        }
+    
+        $heroLines = @(
+            '[grey]The guided setup has finished and the generated automation assets are ready for review.[/]',
+            "[grey]$([string](ConvertTo-SpectreMarkupLiteral -Text $AccessLabel)):[/] [link=$AccessUrl]$AccessUrl[/]"
+        )
+    
+        [Spectre.Console.AnsiConsole]::Write((New-SpectrePanel -Content ([Spectre.Console.Markup]::new(($heroLines -join [Environment]::NewLine))) -Header 'Ready to open' -BorderColor 'green3_1' -Expand -PaddingY 1))
+        [Spectre.Console.AnsiConsole]::WriteLine()
+    
+        if ($NextStepLinks -and $NextStepLinks.Count -gt 0) {
+            $linkMarkup = @(
+                foreach ($nextStep in $NextStepLinks) {
+                    $nextStepUrl = $null
+                    $nextStepLabel = $null
+
+                    if ($nextStep -is [string]) {
+                        $nextStepUrl = $nextStep
+                        $nextStepLabel = $nextStep
+                    }
+                    elseif ($nextStep -is [System.Collections.IDictionary]) {
+                        if ($nextStep.Contains('Url')) {
+                            $nextStepUrl = [string]$nextStep['Url']
+                        }
+
+                        if ($nextStep.Contains('Label') -and -not [string]::IsNullOrWhiteSpace($nextStep['Label'])) {
+                            $nextStepLabel = [string]$nextStep['Label']
+                        }
+                        elseif ($nextStep.Contains('Description') -and -not [string]::IsNullOrWhiteSpace($nextStep['Description'])) {
+                            $nextStepLabel = [string]$nextStep['Description']
+                        }
+                        elseif ($nextStep.Contains('Text') -and -not [string]::IsNullOrWhiteSpace($nextStep['Text'])) {
+                            $nextStepLabel = [string]$nextStep['Text']
+                        }
+                    }
+                    elseif ($nextStep -is [pscustomobject]) {
+                        if ($nextStep.PSObject.Properties.Name -contains 'Url') {
+                            $nextStepUrl = [string]$nextStep.Url
+                        }
+
+                        if ($nextStep.PSObject.Properties.Name -contains 'Label' -and -not [string]::IsNullOrWhiteSpace($nextStep.Label)) {
+                            $nextStepLabel = [string]$nextStep.Label
+                        }
+                        elseif ($nextStep.PSObject.Properties.Name -contains 'Description' -and -not [string]::IsNullOrWhiteSpace($nextStep.Description)) {
+                            $nextStepLabel = [string]$nextStep.Description
+                        }
+                        elseif ($nextStep.PSObject.Properties.Name -contains 'Text' -and -not [string]::IsNullOrWhiteSpace($nextStep.Text)) {
+                            $nextStepLabel = [string]$nextStep.Text
+                        }
+                    }
+
+                    if ([string]::IsNullOrWhiteSpace($nextStepUrl)) {
+                        continue
+                    }
+
+                    if ([string]::IsNullOrWhiteSpace($nextStepLabel)) {
+                        $nextStepLabel = $nextStepUrl
+                    }
+
+                    "• [link=$nextStepUrl]$(ConvertTo-SpectreMarkupLiteral -Text $nextStepLabel)[/]"
+                }
+            ) -join [Environment]::NewLine
+    
+            [Spectre.Console.AnsiConsole]::Write((New-SpectrePanel -Content ([Spectre.Console.Markup]::new($linkMarkup)) -Header 'Next steps' -BorderColor 'yellow3' -Expand))
+            [Spectre.Console.AnsiConsole]::WriteLine()
         }
     }
     
@@ -873,7 +2855,6 @@ else {
             [void][Microsoft.Identity.Client.PublicClientApplicationBuilder]
         }
         catch {
-            Write-Host "Type not found, attempting to load from module..." -ForegroundColor Yellow
             $module = Get-Module -Name "Rnwood.Dataverse.Data.PowerShell"
             if ($module) {
                 $base = $module.ModuleBase
@@ -890,7 +2871,6 @@ else {
                 }
     
                 if ($dllPath -and (Test-Path $dllPath)) {
-                    Write-Host "Loading MSAL from: $dllPath" -ForegroundColor DarkGray
                     Add-Type -Path $dllPath
                 }
                 else {
@@ -904,7 +2884,6 @@ else {
                     }
     
                     if ($found) {
-                        Write-Host "DLL found recursively at: $($found.FullName)" -ForegroundColor Yellow
                         Add-Type -Path $found.FullName
                     }
                 }
@@ -1040,10 +3019,78 @@ else {
         return $secretResponse.secretText
     }
     
+    function Resolve-DataverseEnvironmentFriendlyName {
+        [CmdletBinding()]
+        param(
+            [Parameter()][string]$EnvironmentUrl,
+            [Parameter()][string]$FallbackName
+        )
+    
+        $normalizedEnvironmentUrl = ConvertTo-NormalizedEnvironmentUrl -Url $EnvironmentUrl
+        if ([string]::IsNullOrWhiteSpace($normalizedEnvironmentUrl)) {
+            return $FallbackName
+        }
+    
+        try {
+            $matchingEnvironment = Get-DataverseEnvironmentCatalog | Where-Object {
+                (ConvertTo-NormalizedEnvironmentUrl -Url $_.Endpoints['WebApplication']) -eq $normalizedEnvironmentUrl
+            } | Select-Object -First 1
+    
+            if ($matchingEnvironment -and -not [string]::IsNullOrWhiteSpace($matchingEnvironment.FriendlyName)) {
+                return [string]$matchingEnvironment.FriendlyName
+            }
+        }
+        catch {
+            Write-Host "Could not resolve Dataverse environment name for '$normalizedEnvironmentUrl'. Falling back to '$FallbackName'." -ForegroundColor DarkGray
+        }
+    
+        return $FallbackName
+    }
+    
+    function Resolve-EntraIdApplicationByAppId {
+        [CmdletBinding()]
+        param(
+            [Parameter()][string]$ApplicationId,
+            [Parameter()][string]$TenantId
+        )
+    
+        if ([string]::IsNullOrWhiteSpace($ApplicationId) -or [string]::IsNullOrWhiteSpace($TenantId)) {
+            return $null
+        }
+    
+        if (-not (Get-Variable -Name 'entraApplicationCache' -Scope Script -ErrorAction SilentlyContinue)) {
+            $script:entraApplicationCache = @{}
+        }
+    
+        $cacheKey = "$TenantId|$ApplicationId"
+        if ($script:entraApplicationCache.ContainsKey($cacheKey)) {
+            return $script:entraApplicationCache[$cacheKey]
+        }
+    
+        $graphToken = Get-AuthToken -ResourceUrl 'https://graph.microsoft.com' -TenantId $TenantId
+        $headers = @{ Authorization = "Bearer $($graphToken.AccessToken)" }
+        $uri = "https://graph.microsoft.com/v1.0/applications?`$filter=appId eq '$ApplicationId'&`$select=id,appId,displayName"
+    
+        try {
+            $response = Invoke-RestMethod -Uri $uri -Headers $headers -Method Get
+            $application = $response.value | Select-Object -First 1
+            $script:entraApplicationCache[$cacheKey] = $application
+            return $application
+        }
+        catch {
+            Write-Warning "Failed to resolve App Registration '$ApplicationId' from Entra ID: $($_.Exception.Message)"
+            $script:entraApplicationCache[$cacheKey] = $null
+            return $null
+        }
+    }
+    
 }
+
+$script:setupPhaseNames = @('Connect', 'Repository', 'Configure', 'DEV env', 'Deployment envs')
 
 #region Initialization
 
+Set-SetupPhaseContext -PhaseNames $script:setupPhaseNames -CurrentPhaseIndex 0
 Write-Section "Initialising setup"
 
 $TempModuleRoot = Join-Path ([System.IO.Path]::GetTempPath()) "ALM4Dataverse\Modules"
@@ -1088,7 +3135,6 @@ if ($upstreamRepo -like '__*') {
 }
 
 $requiredModules = @{
-    'PSMenu'                           = '0.2.0'
     'Rnwood.Dataverse.Data.PowerShell' = $rnwoodDataverseVersion
 }
 
@@ -1540,43 +3586,6 @@ function Test-GitHubActionsSecretExists {
     return ($null -ne $result)
 }
 
-function Resolve-EntraIdApplicationByAppId {
-    [CmdletBinding()]
-    param(
-        [Parameter()][string]$ApplicationId,
-        [Parameter()][string]$TenantId
-    )
-
-    if ([string]::IsNullOrWhiteSpace($ApplicationId) -or [string]::IsNullOrWhiteSpace($TenantId)) {
-        return $null
-    }
-
-    if (-not (Get-Variable -Name 'entraApplicationCache' -Scope Script -ErrorAction SilentlyContinue)) {
-        $script:entraApplicationCache = @{}
-    }
-
-    $cacheKey = "$TenantId|$ApplicationId"
-    if ($script:entraApplicationCache.ContainsKey($cacheKey)) {
-        return $script:entraApplicationCache[$cacheKey]
-    }
-
-    $graphToken = Get-AuthToken -ResourceUrl 'https://graph.microsoft.com' -TenantId $TenantId
-    $headers = @{ Authorization = "Bearer $($graphToken.AccessToken)" }
-    $uri = "https://graph.microsoft.com/v1.0/applications?`$filter=appId eq '$ApplicationId'&`$select=id,appId,displayName"
-
-    try {
-        $response = Invoke-RestMethod -Uri $uri -Headers $headers -Method Get
-        $application = $response.value | Select-Object -First 1
-        $script:entraApplicationCache[$cacheKey] = $application
-        return $application
-    }
-    catch {
-        Write-Warning "Failed to resolve App Registration '$ApplicationId' from Entra ID: $($_.Exception.Message)"
-        $script:entraApplicationCache[$cacheKey] = $null
-        return $null
-    }
-}
-
 function Get-GitHubWorkflowReferenceFromRepoClone {
     [CmdletBinding()]
     param(
@@ -1695,9 +3704,11 @@ function Get-GitHubExistingEnvironmentState {
         }
     }
 
+    $friendlyName = Resolve-DataverseEnvironmentFriendlyName -EnvironmentUrl $environmentUrl -FallbackName $EnvironmentName
+
     return [pscustomobject]@{
         ShortName         = $EnvironmentName
-        FriendlyName      = $EnvironmentName
+        FriendlyName      = $friendlyName
         Url               = $environmentUrl
         Credentials       = $existingCredential
         ServiceAccountUPN = $serviceAccountUPN
@@ -1876,10 +3887,16 @@ function Resolve-GitTargetRefFromRemote {
     [CmdletBinding()]
     param(
         [Parameter(Mandatory)][string]$RemoteName,
-        [Parameter(Mandatory)][string]$Ref
+        [Parameter(Mandatory)][string]$Ref,
+        [Parameter()][string]$RepositoryPath
     )
 
-    & git ls-remote --exit-code $RemoteName $Ref | Out-Null
+    $gitArgs = @()
+    if (-not [string]::IsNullOrWhiteSpace($RepositoryPath)) {
+        $gitArgs += @('-C', $RepositoryPath)
+    }
+
+    & git @gitArgs ls-remote --exit-code $RemoteName $Ref | Out-Null
     if ($LASTEXITCODE -eq 2) {
         throw "Could not resolve reference '$Ref' from remote '$RemoteName'."
     }
@@ -1887,7 +3904,7 @@ function Resolve-GitTargetRefFromRemote {
         throw "git ls-remote failed for '$RemoteName' with exit code $LASTEXITCODE"
     }
 
-    $lsRemoteOutput = (& git ls-remote $RemoteName $Ref | Select-Object -First 1)
+    $lsRemoteOutput = (& git @gitArgs ls-remote $RemoteName $Ref | Select-Object -First 1)
     if (-not $lsRemoteOutput) {
         throw "Could not resolve reference '$Ref' from remote '$RemoteName'."
     }
@@ -1908,6 +3925,86 @@ function Resolve-GitTargetRefFromRemote {
     }
 
     return $Ref
+}
+
+function Get-GitHubForkSyncState {
+    <#
+    .SYNOPSIS
+        Clones a GitHub shared workflow repository into a temporary working tree and computes its sync state against upstream.
+    #>
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory)][string]$ForkFullName,
+        [Parameter(Mandatory)][string]$WorkRoot,
+        [Parameter(Mandatory)][string]$UpstreamGitSource,
+        [Parameter(Mandatory)][string]$UpstreamFullName,
+        [Parameter(Mandatory)][string]$Reference,
+        [Parameter(Mandatory)][string]$DefaultBranch
+    )
+
+    & gh repo clone $ForkFullName $WorkRoot 2>&1 | Out-Null
+    if ($LASTEXITCODE -ne 0) {
+        throw "Failed to clone repository '$ForkFullName'."
+    }
+
+    & git -C $WorkRoot checkout $DefaultBranch 2>&1 | Out-Null
+    if ($LASTEXITCODE -ne 0) {
+        & git -C $WorkRoot checkout -b $DefaultBranch "origin/$DefaultBranch" 2>&1 | Out-Null
+        if ($LASTEXITCODE -ne 0) {
+            throw "Failed to check out repository default branch '$DefaultBranch'."
+        }
+    }
+
+    & git -C $WorkRoot remote remove upstream 2>$null | Out-Null
+    & git -C $WorkRoot remote add upstream $UpstreamGitSource 2>&1 | Out-Null
+    if ($LASTEXITCODE -ne 0) {
+        throw "Failed to add upstream remote '$UpstreamGitSource'."
+    }
+
+    & git -C $WorkRoot fetch upstream 2>&1 | Out-Null
+    if ($LASTEXITCODE -ne 0) {
+        throw 'Failed to fetch upstream remote.'
+    }
+
+    $upstreamRef = Resolve-GitTargetRefFromRemote -RemoteName 'upstream' -Ref $Reference -RepositoryPath $WorkRoot
+
+    $localHash = (& git -C $WorkRoot rev-parse HEAD).Trim()
+    $upstreamHash = (& git -C $WorkRoot rev-parse $upstreamRef).Trim()
+    $matchesCanonicalUpstreamDefault = $false
+
+    $canonicalUpstreamSource = Resolve-UpstreamGitRemoteSource -ConfiguredSource $UpstreamFullName -GitHubFullName $UpstreamFullName
+    if (-not [string]::IsNullOrWhiteSpace($canonicalUpstreamSource)) {
+        & git -C $WorkRoot remote remove upstream-github 2>$null | Out-Null
+        & git -C $WorkRoot remote add upstream-github $canonicalUpstreamSource 2>&1 | Out-Null
+        if ($LASTEXITCODE -eq 0) {
+            & git -C $WorkRoot fetch upstream-github $DefaultBranch 2>&1 | Out-Null
+            if ($LASTEXITCODE -eq 0) {
+                $canonicalUpstreamHash = (& git -C $WorkRoot rev-parse "upstream-github/$DefaultBranch").Trim()
+                $matchesCanonicalUpstreamDefault = ($localHash -eq $canonicalUpstreamHash)
+            }
+        }
+    }
+
+    $canFastForward = $false
+    $isAhead = $false
+    if ($localHash -ne $upstreamHash) {
+        & git -C $WorkRoot merge-base --is-ancestor HEAD $upstreamRef
+        $canFastForward = ($LASTEXITCODE -eq 0)
+
+        if (-not $canFastForward) {
+            & git -C $WorkRoot merge-base --is-ancestor $upstreamRef HEAD
+            $isAhead = ($LASTEXITCODE -eq 0)
+        }
+    }
+
+    return [pscustomobject]@{
+        UpstreamRef                     = $upstreamRef
+        LocalHash                       = $localHash
+        UpstreamHash                    = $upstreamHash
+        MatchesCanonicalUpstreamDefault = $matchesCanonicalUpstreamDefault
+        CanFastForward                  = $canFastForward
+        IsAhead                         = $isAhead
+    }
 }
 
 function Get-GitHubForksOfRepositoryForOwner {
@@ -1985,7 +4082,7 @@ function Get-GitHubForksOfRepositoryForOwner {
 function Ensure-GitHubForkForSharedWorkflows {
     <#
     .SYNOPSIS
-        Ensures the user has a fork of the ALM4Dataverse shared workflow repository and optionally updates it from upstream.
+        Ensures the user has a shared workflow repository and optionally updates it from upstream.
     #>
     [CmdletBinding()]
     param(
@@ -1996,8 +4093,15 @@ function Ensure-GitHubForkForSharedWorkflows {
         [Parameter()][string]$PreferredRepositoryFullName
     )
 
-    $existingForks = @(Get-GitHubForksOfRepositoryForOwner -Owner $ForkOwner -UpstreamFullName $UpstreamFullName)
-    $ownedRepos = @(Get-GitHubOwnedReposForOwner -Owner $ForkOwner)
+    $sharedRepositoryOptions = Invoke-WithSpectreStatus -Status 'Retrieving shared workflow repository options...' -ScriptBlock {
+        [pscustomobject]@{
+            ExistingForks = @(Get-GitHubForksOfRepositoryForOwner -Owner $ForkOwner -UpstreamFullName $UpstreamFullName)
+            OwnedRepos    = @(Get-GitHubOwnedReposForOwner -Owner $ForkOwner)
+        }
+    }
+
+    $existingForks = @($sharedRepositoryOptions.ExistingForks)
+    $ownedRepos = @($sharedRepositoryOptions.OwnedRepos)
 
     $menuItems = @()
     $menuActions = @()
@@ -2047,194 +4151,176 @@ function Ensure-GitHubForkForSharedWorkflows {
         throw "No shared workflow repository selected."
     }
 
-    $selectedForkFullName = $null
-    $createdNewFork = $false
+    $selectedSharedRepositoryFullName = $null
+    $createdNewSharedRepository = $false
     $selectedAction = $menuActions[$selection]
     if ($selectedAction.Type -eq 'UseExisting') {
-        $selectedForkFullName = $selectedAction.FullName
+        $selectedSharedRepositoryFullName = $selectedAction.FullName
     }
 
-    if (-not $selectedForkFullName) {
+    if (-not $selectedSharedRepositoryFullName) {
         $upstreamParts = $UpstreamFullName.Split('/', 2)
-        $defaultForkName = $upstreamParts[1]
+        $defaultRepositoryName = $upstreamParts[1]
         if (-not [string]::IsNullOrWhiteSpace($PreferredRepositoryFullName) -and $PreferredRepositoryFullName -match '^[^/]+/(.+)$') {
-            $defaultForkName = $Matches[1]
+            $defaultRepositoryName = $Matches[1]
         }
 
         while ($true) {
-            $forkName = Read-Host "Fork repository name [$defaultForkName]"
-            if ([string]::IsNullOrWhiteSpace($forkName)) {
-                $forkName = $defaultForkName
-            }
+            $repositoryName = Read-TextWithDefault -Prompt 'Shared workflow repository name' -DefaultValue $defaultRepositoryName
 
-            if ($forkName -match '^[A-Za-z0-9._-]+$') {
+            if ($repositoryName -match '^[A-Za-z0-9._-]+$') {
                 break
             }
 
             Write-Warning "Repository name contains invalid characters. Use letters, numbers, dot (.), underscore (_), or hyphen (-)."
         }
 
-        $selectedForkFullName = "$ForkOwner/$forkName"
-        Write-Host "Creating fork '$selectedForkFullName' from '$UpstreamFullName'..." -ForegroundColor Yellow
+        $selectedSharedRepositoryFullName = "$ForkOwner/$repositoryName"
 
-        $createArgs = @('repo', 'fork', $UpstreamFullName, '--clone=false', '--fork-name', $forkName)
-        $createResult = & gh @createArgs 2>&1
-        if ($LASTEXITCODE -ne 0) {
-            $errText = $createResult -join "`n"
-            if ($errText -match 'already exists') {
-                Write-Host "Repository '$selectedForkFullName' already exists; continuing." -ForegroundColor Yellow
-            }
-            else {
-                throw "Failed to create fork '$selectedForkFullName': $errText"
+        $creationModeItems = @(
+            'Public (fork)',
+            'Private'
+        )
+        $creationModeSelection = Select-FromMenu -Title "How should '$selectedSharedRepositoryFullName' be created?" -Items $creationModeItems
+        if ($null -eq $creationModeSelection) {
+            throw 'No shared workflow repository type selected.'
+        }
+
+        if ($creationModeSelection -eq 0) {
+            $createResult = Invoke-WithSpectreStatus -Status "Creating public fork '$selectedSharedRepositoryFullName' from '$UpstreamFullName'..." -ScriptBlock {
+                $createArgs = @('repo', 'fork', $UpstreamFullName, '--clone=false', '--fork-name', $repositoryName)
+                $createOutput = @(& gh @createArgs 2>&1)
+                return [pscustomobject]@{
+                    ExitCode = $LASTEXITCODE
+                    Output   = $createOutput
+                }
             }
         }
         else {
-            $createdNewFork = $true
+            $createResult = Invoke-WithSpectreStatus -Status "Creating private shared workflow repository '$selectedSharedRepositoryFullName'..." -ScriptBlock {
+                $createArgs = @('repo', 'create', $selectedSharedRepositoryFullName, '--private', '--add-readme')
+                $createOutput = @(& gh @createArgs 2>&1)
+                return [pscustomobject]@{
+                    ExitCode = $LASTEXITCODE
+                    Output   = $createOutput
+                }
+            }
+        }
+
+        if ($createResult.ExitCode -ne 0) {
+            $errText = @($createResult.Output) -join "`n"
+            if ($errText -match 'already exists') {
+                Write-Host "Repository '$selectedSharedRepositoryFullName' already exists; continuing." -ForegroundColor Yellow
+            }
+            else {
+                throw "Failed to create shared workflow repository '$selectedSharedRepositoryFullName': $errText"
+            }
+        }
+        else {
+            $createdNewSharedRepository = $true
         }
     }
 
-    $forkParts = $selectedForkFullName.Split('/', 2)
-    $forkOwnerName = $forkParts[0]
-    $forkRepoName = $forkParts[1]
-    $forkRepo = Get-GitHubRepo -Owner $forkOwnerName -Repo $forkRepoName
+    $sharedRepoParts = $selectedSharedRepositoryFullName.Split('/', 2)
+    $sharedRepoOwnerName = $sharedRepoParts[0]
+    $sharedRepoName = $sharedRepoParts[1]
+    $sharedRepo = Invoke-WithSpectreStatus -Status "Loading repository details for '$selectedSharedRepositoryFullName'..." -ScriptBlock {
+        Get-GitHubRepo -Owner $sharedRepoOwnerName -Repo $sharedRepoName
+    }
 
     $defaultBranch = 'main'
-    if ($forkRepo.defaultBranchRef -and $forkRepo.defaultBranchRef.name) {
-        $defaultBranch = $forkRepo.defaultBranchRef.name
+    if ($sharedRepo.defaultBranchRef -and $sharedRepo.defaultBranchRef.name) {
+        $defaultBranch = $sharedRepo.defaultBranchRef.name
     }
 
     $workParent = Join-Path $env:TEMP ("ALM4Dataverse-ForkSync-" + [guid]::NewGuid().ToString('n'))
     $workRoot = Join-Path $workParent 'repo'
     New-DirectoryIfMissing -Path $workParent
 
-    $didPushLocation = $false
     try {
-        Write-Host "Checking fork '$selectedForkFullName' against upstream '$UpstreamFullName'..." -ForegroundColor DarkGray
-
-        & gh repo clone $selectedForkFullName $workRoot 2>&1 | Out-Host
-        if ($LASTEXITCODE -ne 0) {
-            throw "Failed to clone fork '$selectedForkFullName'."
+        $forkSyncState = Invoke-WithSpectreStatus -Status "Checking shared workflow repository '$selectedSharedRepositoryFullName' against upstream '$UpstreamFullName'..." -ScriptBlock {
+            Get-GitHubForkSyncState `
+                -ForkFullName $selectedSharedRepositoryFullName `
+                -WorkRoot $workRoot `
+                -UpstreamGitSource $UpstreamGitSource `
+                -UpstreamFullName $UpstreamFullName `
+                -Reference $Reference `
+                -DefaultBranch $defaultBranch
         }
 
-        Push-Location $workRoot
-        $didPushLocation = $true
-
-        & git checkout $defaultBranch 2>&1 | Out-Null
-        if ($LASTEXITCODE -ne 0) {
-            & git checkout -b $defaultBranch "origin/$defaultBranch" 2>&1 | Out-Null
-            if ($LASTEXITCODE -ne 0) {
-                throw "Failed to check out fork default branch '$defaultBranch'."
-            }
-        }
-
-        # Reset upstream remote to the configured source
-        & git remote remove upstream 2>$null | Out-Null
-        & git remote add upstream $UpstreamGitSource 2>&1 | Out-Null
-        if ($LASTEXITCODE -ne 0) {
-            throw "Failed to add upstream remote '$UpstreamGitSource'."
-        }
-
-        & git fetch upstream 2>&1 | Out-Null
-        if ($LASTEXITCODE -ne 0) {
-            throw "Failed to fetch upstream remote."
-        }
-
-        $upstreamRef = Resolve-GitTargetRefFromRemote -RemoteName 'upstream' -Ref $Reference
-
-        $localHash = (& git rev-parse HEAD).Trim()
-        $upstreamHash = (& git rev-parse $upstreamRef).Trim()
-        $matchesCanonicalUpstreamDefault = $false
-
-        $canonicalUpstreamSource = Resolve-UpstreamGitRemoteSource -ConfiguredSource $UpstreamFullName -GitHubFullName $UpstreamFullName
-        if (-not [string]::IsNullOrWhiteSpace($canonicalUpstreamSource)) {
-            & git remote remove upstream-github 2>$null | Out-Null
-            & git remote add upstream-github $canonicalUpstreamSource 2>&1 | Out-Null
-            if ($LASTEXITCODE -eq 0) {
-                & git fetch upstream-github $defaultBranch 2>&1 | Out-Null
-                if ($LASTEXITCODE -eq 0) {
-                    $canonicalUpstreamHash = (& git rev-parse "upstream-github/$defaultBranch").Trim()
-                    $matchesCanonicalUpstreamDefault = ($localHash -eq $canonicalUpstreamHash)
-                }
-            }
-        }
-
-        if ($localHash -eq $upstreamHash) {
-            Write-Host "Fork is already up to date for ref '$Reference'."
+        if ($forkSyncState.LocalHash -eq $forkSyncState.UpstreamHash) {
+            Write-Host "Shared workflow repository is already up to date for ref '$Reference'."
         }
         else {
-            if ($createdNewFork -or $matchesCanonicalUpstreamDefault) {
-                Write-Host "Fresh fork detected. Aligning '$selectedForkFullName' '$defaultBranch' to ref '$Reference'..." -ForegroundColor Yellow
+            if ($createdNewSharedRepository -or $forkSyncState.MatchesCanonicalUpstreamDefault) {
+                Invoke-WithErrorHandling -OperationName "Aligning shared workflow repository '$selectedSharedRepositoryFullName'" -StatusMessage "Aligning shared workflow repository '$selectedSharedRepositoryFullName' to ref '$Reference'..." -CaptureOutputInPanel -ScriptBlock {
+                    & git -C $workRoot reset --hard $forkSyncState.UpstreamRef 2>&1 | Out-Host
+                    if ($LASTEXITCODE -ne 0) {
+                        throw "Failed to align shared workflow repository '$selectedSharedRepositoryFullName' to ref '$Reference'."
+                    }
 
-                & git reset --hard $upstreamRef 2>&1 | Out-Host
-                if ($LASTEXITCODE -ne 0) {
-                    throw "Failed to align new fork '$selectedForkFullName' to ref '$Reference'."
-                }
+                    & git -C $workRoot push --force-with-lease origin $defaultBranch 2>&1 | Out-Host
+                    if ($LASTEXITCODE -ne 0) { throw 'Git push failed.' }
+                } | Out-Null
 
-                & git push --force-with-lease origin $defaultBranch 2>&1 | Out-Host
-                if ($LASTEXITCODE -ne 0) { throw "Git push failed." }
-
-                Write-Host "Fork aligned successfully."
-                return Get-GitHubRepo -Owner $forkOwnerName -Repo $forkRepoName
+                Write-Host "Shared workflow repository aligned successfully."
+                return Get-GitHubRepo -Owner $sharedRepoOwnerName -Repo $sharedRepoName
             }
 
-            & git merge-base --is-ancestor HEAD $upstreamRef
-            $canFastForward = ($LASTEXITCODE -eq 0)
+            if ($forkSyncState.CanFastForward) {
+                if (Read-YesNo -Prompt "Updates are available from upstream (fast-forward). Update '$selectedSharedRepositoryFullName'?" ) {
+                    Invoke-WithErrorHandling -OperationName "Fast-forwarding shared workflow repository '$selectedSharedRepositoryFullName'" -StatusMessage "Fast-forwarding shared workflow repository '$selectedSharedRepositoryFullName'..." -CaptureOutputInPanel -ScriptBlock {
+                        & git -C $workRoot merge --ff-only $forkSyncState.UpstreamRef 2>&1 | Out-Host
+                        if ($LASTEXITCODE -ne 0) { throw 'Git merge failed.' }
 
-            if ($canFastForward) {
-                if (Read-YesNo -Prompt "Updates are available from upstream (fast-forward). Update '$selectedForkFullName'?" ) {
-                    Write-Host "Fast-forwarding fork..." -ForegroundColor Yellow
-                    & git merge --ff-only $upstreamRef 2>&1 | Out-Host
-                    if ($LASTEXITCODE -ne 0) { throw "Git merge failed." }
+                        & git -C $workRoot push origin $defaultBranch 2>&1 | Out-Host
+                        if ($LASTEXITCODE -ne 0) { throw 'Git push failed.' }
+                    } | Out-Null
 
-                    & git push origin $defaultBranch 2>&1 | Out-Host
-                    if ($LASTEXITCODE -ne 0) { throw "Git push failed." }
-
-                    Write-Host "Fork updated successfully."
+                    Write-Host "Shared workflow repository updated successfully."
                 }
             }
             else {
-                & git merge-base --is-ancestor $upstreamRef HEAD
-                $isAhead = ($LASTEXITCODE -eq 0)
-
-                if ($isAhead) {
-                    Write-Host "Fork is ahead of upstream for ref '$Reference'." -ForegroundColor Yellow
+                if ($forkSyncState.IsAhead) {
+                    Write-Host "Shared workflow repository is ahead of upstream for ref '$Reference'." -ForegroundColor Yellow
                 }
                 else {
                     $divergedMenuItems = @(
-                        "Rebase '$selectedForkFullName' onto ref '$Reference'",
-                        "Reset '$selectedForkFullName' '$defaultBranch' to ref '$Reference' (force push)",
-                        "Leave '$selectedForkFullName' unchanged"
+                        "Rebase '$selectedSharedRepositoryFullName' onto ref '$Reference'",
+                        "Reset '$selectedSharedRepositoryFullName' '$defaultBranch' to ref '$Reference' (force push)",
+                        "Leave '$selectedSharedRepositoryFullName' unchanged"
                     )
-                    $divergedSelection = Select-FromMenu -Title "Fork '$selectedForkFullName' has diverged from upstream. Choose how to update it." -Items $divergedMenuItems
+                    $divergedSelection = Select-FromMenu -Title "Shared workflow repository '$selectedSharedRepositoryFullName' has diverged from upstream. Choose how to update it." -Items $divergedMenuItems
 
                     switch ($divergedSelection) {
                         0 {
-                            Write-Host "Rebasing fork onto upstream ref..." -ForegroundColor Yellow
-                            & git rebase $upstreamRef 2>&1 | Out-Host
-                            if ($LASTEXITCODE -ne 0) {
-                                throw "Git rebase failed - resolve conflicts manually in '$selectedForkFullName'."
-                            }
+                            Invoke-WithErrorHandling -OperationName "Rebasing shared workflow repository '$selectedSharedRepositoryFullName'" -StatusMessage "Rebasing shared workflow repository '$selectedSharedRepositoryFullName' onto '$Reference'..." -CaptureOutputInPanel -ScriptBlock {
+                                & git -C $workRoot rebase $forkSyncState.UpstreamRef 2>&1 | Out-Host
+                                if ($LASTEXITCODE -ne 0) {
+                                    throw "Git rebase failed - resolve conflicts manually in '$selectedSharedRepositoryFullName'."
+                                }
 
-                            Write-Host "Pushing rebased branch (force-with-lease)..." -ForegroundColor Yellow
-                            & git push --force-with-lease origin $defaultBranch 2>&1 | Out-Host
-                            if ($LASTEXITCODE -ne 0) { throw "Git push failed." }
+                                & git -C $workRoot push --force-with-lease origin $defaultBranch 2>&1 | Out-Host
+                                if ($LASTEXITCODE -ne 0) { throw 'Git push failed.' }
+                            } | Out-Null
 
-                            Write-Host "Fork updated successfully."
+                            Write-Host "Shared workflow repository updated successfully."
                         }
                         1 {
-                            Write-Host "Resetting fork to ref '$Reference' and force pushing..." -ForegroundColor Yellow
-                            & git reset --hard $upstreamRef 2>&1 | Out-Host
-                            if ($LASTEXITCODE -ne 0) {
-                                throw "Failed to reset fork '$selectedForkFullName' to ref '$Reference'."
-                            }
+                            Invoke-WithErrorHandling -OperationName "Resetting shared workflow repository '$selectedSharedRepositoryFullName'" -StatusMessage "Resetting shared workflow repository '$selectedSharedRepositoryFullName' to '$Reference'..." -CaptureOutputInPanel -ScriptBlock {
+                                & git -C $workRoot reset --hard $forkSyncState.UpstreamRef 2>&1 | Out-Host
+                                if ($LASTEXITCODE -ne 0) {
+                                    throw "Failed to reset shared workflow repository '$selectedSharedRepositoryFullName' to ref '$Reference'."
+                                }
 
-                            & git push --force-with-lease origin $defaultBranch 2>&1 | Out-Host
-                            if ($LASTEXITCODE -ne 0) { throw "Git push failed." }
+                                & git -C $workRoot push --force-with-lease origin $defaultBranch 2>&1 | Out-Host
+                                if ($LASTEXITCODE -ne 0) { throw 'Git push failed.' }
+                            } | Out-Null
 
-                            Write-Host "Fork updated successfully."
+                            Write-Host "Shared workflow repository updated successfully."
                         }
                         default {
-                            Write-Host "Leaving fork unchanged." -ForegroundColor Yellow
+                            Write-Host "Leaving shared workflow repository unchanged." -ForegroundColor Yellow
                         }
                     }
                 }
@@ -2242,13 +4328,10 @@ function Ensure-GitHubForkForSharedWorkflows {
         }
     }
     finally {
-        if ($didPushLocation) {
-            Pop-Location
-        }
         try { Remove-Item -LiteralPath $workParent -Recurse -Force -ErrorAction SilentlyContinue } catch { }
     }
 
-    return Get-GitHubRepo -Owner $forkOwnerName -Repo $forkRepoName
+    return Get-GitHubRepo -Owner $sharedRepoOwnerName -Repo $sharedRepoName
 }
 
 function New-GitHubRepositoryInteractive {
@@ -2265,14 +4348,11 @@ function New-GitHubRepositoryInteractive {
     Write-Host "Create a new GitHub repository" -ForegroundColor Green
     Write-Host ""
 
-    $owner = Read-Host "Repository owner (user or org) [$DefaultOwner]"
-    if ([string]::IsNullOrWhiteSpace($owner)) {
-        $owner = $DefaultOwner
-    }
+    $owner = Read-TextWithDefault -Prompt 'Repository owner (user or organization)' -DefaultValue $DefaultOwner
 
     $repoName = $null
     while ($true) {
-        $repoName = Read-Host "New repository name"
+        $repoName = Read-TextWithDefault -Prompt 'New repository name'
         if ([string]::IsNullOrWhiteSpace($repoName)) {
             Write-Warning "Repository name cannot be empty."
             continue
@@ -2294,15 +4374,23 @@ function New-GitHubRepositoryInteractive {
     $visibilityFlag = if ($visibilitySelection -eq 0) { '--private' } else { '--public' }
     $repoFullName = "$owner/$repoName"
 
-    Write-Host "Creating repository '$repoFullName'..." -ForegroundColor Yellow
-    $createArgs = @('repo', 'create', $repoFullName, $visibilityFlag, '--add-readme')
-    $result = & gh @createArgs 2>&1
-    if ($LASTEXITCODE -ne 0) {
-        throw "Failed to create repository '$repoFullName': $($result -join "`n")"
+    $createResult = Invoke-WithSpectreStatus -Status "Creating repository '$repoFullName'..." -ScriptBlock {
+        $createArgs = @('repo', 'create', $repoFullName, $visibilityFlag, '--add-readme')
+        $output = @(& gh @createArgs 2>&1)
+        return [pscustomobject]@{
+            ExitCode = $LASTEXITCODE
+            Output   = $output
+        }
+    }
+
+    if ($createResult.ExitCode -ne 0) {
+        throw "Failed to create repository '$repoFullName': $(@($createResult.Output) -join "`n")"
     }
 
     Write-Host "Created repository '$repoFullName'." -ForegroundColor Green
-    return Get-GitHubRepo -Owner $owner -Repo $repoName
+    return Invoke-WithSpectreStatus -Status "Loading repository details for '$repoFullName'..." -ScriptBlock {
+        Get-GitHubRepo -Owner $owner -Repo $repoName
+    }
 }
 
 #endregion
@@ -2564,11 +4652,11 @@ function Get-GitHubCredentialsForEnvironment {
     }
     else { # Manual
         Write-Host "Enter App Registration details:" -ForegroundColor Cyan
-        $name = Read-Host "Friendly name (for reuse reference)"
+        $name = Read-TextWithDefault -Prompt 'Friendly name (for reuse reference)' -AllowEmpty
         if ([string]::IsNullOrWhiteSpace($name)) { $name = "Credential-" + (Get-Date -Format "HHmm") }
         
         while ($true) {
-            $appId = Read-Host "Application ID (Client ID)"
+            $appId = Read-TextWithDefault -Prompt 'Application ID (Client ID)'
             if ($appId -match '^[0-9a-fA-F]{8}-([0-9a-fA-F]{4}-){3}[0-9a-fA-F]{12}$') {
                 break
             }
@@ -2578,7 +4666,7 @@ function Get-GitHubCredentialsForEnvironment {
         }
 
         while ($true) {
-            $appObjectId = Read-Host "Application Object ID (from Entra ID > App registrations > Overview, NOT the 'Object ID' of the enterprise app)"
+            $appObjectId = Read-TextWithDefault -Prompt 'Application object ID (from App registrations > Overview, not the enterprise app object ID)'
             if ($appObjectId -match '^[0-9a-fA-F]{8}-([0-9a-fA-F]{4}-){3}[0-9a-fA-F]{12}$') {
                 break
             }
@@ -2601,9 +4689,7 @@ function Get-GitHubCredentialsForEnvironment {
         $secret = $null
         if ($authType -eq 'Secret') {
             while ($true) {
-                $secretSecure = Read-Host "Client Secret" -AsSecureString
-                $bstr   = [System.Runtime.InteropServices.Marshal]::SecureStringToBSTR($secretSecure)
-                $secret = [System.Runtime.InteropServices.Marshal]::PtrToStringAuto($bstr)
+                $secret = Read-SecretText -Prompt 'Client Secret'
                 
                 if ($secret -match '^[0-9a-fA-F]{8}-([0-9a-fA-F]{4}-){3}[0-9a-fA-F]{12}$') {
                     Write-Warning "The Client Secret looks like a GUID. You should enter the Secret VALUE, not the Secret ID."
@@ -2658,6 +4744,47 @@ function Get-GitHubExistingEnvironmentSelectionSummary {
     return ($summaryParts -join ' | ')
 }
 
+function Get-DataverseEnvironmentCatalog {
+    [CmdletBinding()]
+    param(
+        [Parameter()][switch]$ForceRefresh,
+        [Parameter()][switch]$ShowStatus
+    )
+
+    $hasCachedCatalog = ($null -ne (Get-Variable -Name 'dataverseEnvironmentCatalog' -Scope Script -ErrorAction SilentlyContinue)) -and $null -ne $script:dataverseEnvironmentCatalog
+    if (-not $ForceRefresh -and $hasCachedCatalog) {
+        return @($script:dataverseEnvironmentCatalog)
+    }
+
+    $fetchCatalog = {
+        @(Get-DataverseEnvironment -AccessToken {
+            param($resource)
+            if (-not $resource) { $resource = 'https://globaldisco.crm.dynamics.com/' }
+            try {
+                $uri = [System.Uri]$resource
+                $resource = $uri.GetLeftPart([System.UriPartial]::Authority)
+            }
+            catch {}
+
+            $auth = Get-AuthToken -ResourceUrl $resource -TenantId $TenantId
+            return $auth.AccessToken
+        })
+    }
+
+    if ($ShowStatus) {
+        $script:dataverseEnvironmentCatalog = @(Invoke-WithSpectreStatus -Status 'Retrieving Dataverse environments...' -ScriptBlock $fetchCatalog)
+    }
+    else {
+        $script:dataverseEnvironmentCatalog = @(& $fetchCatalog)
+    }
+
+    if (-not $script:dataverseEnvironmentCatalog -or $script:dataverseEnvironmentCatalog.Count -eq 0) {
+        throw 'No Dataverse environments found. Ensure the account has access to at least one environment.'
+    }
+
+    return @($script:dataverseEnvironmentCatalog)
+}
+
 function Select-DataverseEnvironment {
     [CmdletBinding()]
     param(
@@ -2669,22 +4796,8 @@ function Select-DataverseEnvironment {
     )
 
     Write-Host ""
-    Write-Host "Retrieving Dataverse environments..." -ForegroundColor Yellow
-    
-    $environments = @(Get-DataverseEnvironment -AccessToken { 
-        param($resource)
-        if (-not $resource) { $resource = 'https://globaldisco.crm.dynamics.com/' }
-        try {
-            $uri = [System.Uri]$resource
-            $resource = $uri.GetLeftPart([System.UriPartial]::Authority)
-        } catch {}
-        $auth = Get-AuthToken -ResourceUrl $resource -TenantId $TenantId
-        return $auth.AccessToken
-    })
 
-    if ($environments.Count -eq 0) {
-        throw "No Dataverse environments found. Ensure the account has access to at least one environment."
-    }
+    $environments = @(Get-DataverseEnvironmentCatalog -ShowStatus)
 
     $normalizedExcludeUrl = ConvertTo-NormalizedEnvironmentUrl -Url $ExcludeUrl
     $normalizedPreferredUrl = ConvertTo-NormalizedEnvironmentUrl -Url $PreferredUrl
@@ -2926,7 +5039,7 @@ function Get-DataverseServiceAccountUPN {
         Write-Host ""
         
         while ($true) {
-            $upn = Read-Host "Service Account UPN (e.g., serviceaccount@contoso.com)"
+            $upn = Read-TextWithDefault -Prompt 'Service Account UPN (for example: serviceaccount@contoso.com)'
             if ([string]::IsNullOrWhiteSpace($upn)) {
                 Write-Warning "Service Account UPN cannot be empty."
                 continue
@@ -2957,38 +5070,48 @@ function Get-DataverseSolutionsSelection {
     ) -DocRelativePath 'docs/config/alm-config.md' -Ref $ALM4DataverseRef
 
     $existingEnvironmentSummary = Get-GitHubExistingEnvironmentSelectionSummary -ExistingEnvironment $ExistingEnvironmentConfiguration
-    $selectedEnv = Select-DataverseEnvironment -Prompt "Select your DEV environment" -PreferredUrl $ExistingEnvironmentUrl -PreferredSelectionSummary $existingEnvironmentSummary -KeepPreferredInList
+    $selectedEnv = Select-DataverseEnvironment -Prompt "Select your DEV environment" -PreferredUrl $ExistingEnvironmentUrl -PreferredSelectionSummary $existingEnvironmentSummary
     if (-not $selectedEnv) { throw "No environment selected." }
 
-    $reuseExistingConfiguration = ($selectedEnv.PSObject.Properties.Name -contains 'UseExistingConfiguration' -and $selectedEnv.UseExistingConfiguration)
-
     $devEnvUrl = ConvertTo-NormalizedEnvironmentUrl -Url $selectedEnv.Endpoints["WebApplication"]
+    $normalizedExistingEnvironmentUrl = ConvertTo-NormalizedEnvironmentUrl -Url $ExistingEnvironmentUrl
+    $reuseExistingConfiguration = (
+        ($selectedEnv.PSObject.Properties.Name -contains 'UseExistingConfiguration' -and $selectedEnv.UseExistingConfiguration) -or
+        (
+            -not [string]::IsNullOrWhiteSpace($normalizedExistingEnvironmentUrl) -and
+            $devEnvUrl -ieq $normalizedExistingEnvironmentUrl
+        )
+    )
+
     Write-Host "Selected: $($selectedEnv.FriendlyName) ($devEnvUrl)" -ForegroundColor Cyan
 
-    $connection = Get-DataverseConnection -Url $devEnvUrl -AccessToken { 
-        param($resource)
-        if (-not $resource) { $resource = 'https://globaldisco.crm.dynamics.com/' }
-        try {
-            $uri = [System.Uri]$resource
-            $resource = $uri.GetLeftPart([System.UriPartial]::Authority)
-        } catch {}
-        $auth = Get-AuthToken -ResourceUrl $resource -TenantId $TenantId
-        return $auth.AccessToken
+    $connection = Invoke-WithSpectreStatus -Status 'Connecting to the selected DEV environment...' -ScriptBlock {
+        Get-DataverseConnection -Url $devEnvUrl -AccessToken {
+            param($resource)
+            if (-not $resource) { $resource = 'https://globaldisco.crm.dynamics.com/' }
+            try {
+                $uri = [System.Uri]$resource
+                $resource = $uri.GetLeftPart([System.UriPartial]::Authority)
+            } catch {}
+            $auth = Get-AuthToken -ResourceUrl $resource -TenantId $TenantId
+            return $auth.AccessToken
+        }
     }
     
     if (-not $connection) { throw "Failed to connect to Dataverse environment." }
     
     Write-Host "Connected to: $($connection.ConnectedOrgFriendlyName)"
-    Write-Host "Retrieving solutions..." -ForegroundColor Yellow
     
-    $allSolutions = Get-DataverseRecord -Connection $connection -TableName 'solution' -Columns @('solutionid','uniquename','friendlyname','version','ismanaged') -FilterValues @{
-        'isvisible' = $true
-        'ismanaged' = $false
+    $allSolutions = Invoke-WithSpectreStatus -Status 'Retrieving unmanaged solutions from Dataverse...' -ScriptBlock {
+        Get-DataverseRecord -Connection $connection -TableName 'solution' -Columns @('solutionid','uniquename','friendlyname','version','ismanaged') -FilterValues @{
+            'isvisible' = $true
+            'ismanaged' = $false
+        }
     }
     
     if (-not $allSolutions -or $allSolutions.Count -eq 0) {
         Write-Host "No unmanaged solutions found in the environment." -ForegroundColor Yellow
-        return @{ Solutions = @(); EnvironmentUrl = $devEnvUrl; ReuseExistingConfiguration = $reuseExistingConfiguration }
+        return [pscustomobject]@{ Solutions = @(); EnvironmentUrl = $devEnvUrl; ReuseExistingConfiguration = $reuseExistingConfiguration }
     }
     
     $userSolutions = @($allSolutions | Where-Object { 
@@ -2998,7 +5121,7 @@ function Get-DataverseSolutionsSelection {
     
     if ($userSolutions.Count -eq 0) {
         Write-Host "No user-created solutions found." -ForegroundColor Yellow
-        return @{ Solutions = @(); EnvironmentUrl = $devEnvUrl; ReuseExistingConfiguration = $reuseExistingConfiguration }
+        return [pscustomobject]@{ Solutions = @(); EnvironmentUrl = $devEnvUrl; ReuseExistingConfiguration = $reuseExistingConfiguration }
     }
 
     # Pre-populate from existing alm-config.psd1 if available
@@ -3028,7 +5151,7 @@ function Get-DataverseSolutionsSelection {
         $configSolutions += @{ name = $sol.uniquename; deployUnmanaged = $false }
     }
     
-    return @{ Solutions = $configSolutions; EnvironmentUrl = $devEnvUrl; EnvironmentFriendlyName = $selectedEnv.FriendlyName; ReuseExistingConfiguration = $reuseExistingConfiguration }
+    return [pscustomobject]@{ Solutions = $configSolutions; EnvironmentUrl = $devEnvUrl; EnvironmentFriendlyName = $selectedEnv.FriendlyName; ReuseExistingConfiguration = $reuseExistingConfiguration }
 }
 
 function Get-GitHubEnvironmentConfiguration {
@@ -3464,11 +5587,11 @@ function Publish-GitHubRepoChanges {
 
         & git config user.name 'ALM4Dataverse Setup'
         & git config user.email 'setup@alm4dataverse.local'
-        & git commit -m $PublishPlan.CommitMessage 2>&1 | Out-Host
+        & git commit -m $PublishPlan.CommitMessage 2>&1
         if ($LASTEXITCODE -ne 0) { throw 'Git commit failed.' }
 
         Write-Host "Pushing to origin/$($PublishPlan.BranchName)..." -ForegroundColor Yellow
-        & git push -u origin $PublishPlan.BranchName 2>&1 | Out-Host
+        & git push -u origin $PublishPlan.BranchName 2>&1
         if ($LASTEXITCODE -ne 0) { throw 'Git push failed.' }
 
         $pullRequestUrl = $null
@@ -3486,7 +5609,7 @@ function Publish-GitHubRepoChanges {
             $existingPullRequest = $existingPullRequests | Select-Object -First 1
             if ($existingPullRequest) {
                 Write-Host "Updating existing pull request #$($existingPullRequest.number)..." -ForegroundColor Yellow
-                & gh pr edit $existingPullRequest.number --title $PublishPlan.PullRequestTitle --body $PublishPlan.PullRequestDescription 2>&1 | Out-Host
+                & gh pr edit $existingPullRequest.number --title $PublishPlan.PullRequestTitle --body $PublishPlan.PullRequestDescription 2>&1
                 if ($LASTEXITCODE -ne 0) {
                     throw 'Failed to update the pull request.'
                 }
@@ -3521,11 +5644,18 @@ function Publish-GitHubRepoChanges {
 #  MAIN SETUP FLOW
 # ─────────────────────────────────────────────────────────────
 
+Set-SetupPhaseContext -PhaseNames $script:setupPhaseNames -CurrentPhaseIndex 0
 Write-Section "Authenticating with GitHub"
 
-Write-Host "Checking GitHub CLI authentication status..." -ForegroundColor Yellow
-$ghStatus = & gh auth status --hostname github.com 2>&1
-$hasExistingGitHubLogin = ($LASTEXITCODE -eq 0)
+$ghStatusProbe = Invoke-WithSpectreStatus -Status 'Checking GitHub CLI authentication status...' -ScriptBlock {
+    $output = @(& gh auth status --hostname github.com 2>&1)
+    return [pscustomobject]@{
+        Output   = $output
+        ExitCode = $LASTEXITCODE
+    }
+}
+$ghStatus = @($ghStatusProbe.Output)
+$hasExistingGitHubLogin = ($ghStatusProbe.ExitCode -eq 0)
 
 if ($hasExistingGitHubLogin) {
     $existingGhUser = (& gh api user --jq '.login' 2>&1 | Out-String).Trim()
@@ -3546,7 +5676,6 @@ if ($hasExistingGitHubLogin) {
 
     if ($ghChoice -eq 0) {
         Write-Host "Using existing GitHub login." -ForegroundColor Green
-        Write-Host ($ghStatus -join "`n") -ForegroundColor DarkGray
     }
     else {
         Write-Host "Signing in with a different GitHub account..." -ForegroundColor Yellow
@@ -3606,16 +5735,14 @@ if ($cachedAzureAccounts.Count -gt 0) {
 
     if ($azureAuthChoice -lt $cachedAzureAccounts.Count) {
         $preferredAzureUsername = $cachedAzureAccounts[$azureAuthChoice]
-        Write-Host "Using cached Azure login: $preferredAzureUsername" -ForegroundColor Green
     }
     else {
         $forceAzureInteractive = $true
-        Read-Host "Press Enter to open browser for Azure authentication..."
+        Wait-ForUserAcknowledgement -Message 'Open the browser for Azure authentication when you are ready.' -ContinueLabel 'Open browser'
     }
 }
 else {
-    Write-Host "No cached Azure login detected. Browser sign-in is required." -ForegroundColor Yellow
-    Read-Host "Press Enter to open browser for Azure authentication..."
+    Wait-ForUserAcknowledgement -Message 'Open the browser for Azure authentication when you are ready.' -ContinueLabel 'Open browser'
 }
 
 $script:azureAuthResult = Invoke-WithErrorHandling -OperationName "Azure Authentication" -ScriptBlock {
@@ -3638,6 +5765,7 @@ if ([string]::IsNullOrWhiteSpace($TenantId)) {
 Assert-ValidTenantIdentifier -TenantIdentifier $TenantId -Source 'Resolved Azure tenant ID'
 
 # ─────────────────────────────────────────────────────────────
+Set-SetupPhaseContext -PhaseNames $script:setupPhaseNames -CurrentPhaseIndex 1
 Write-Section "Ensuring Shared Workflow Repository"
 
 $upstreamWorkflowRepoFullName = Resolve-GitHubRepoFullNameFromSource -Source $upstreamRepo -Fallback 'ALM4Dataverse/ALM4Dataverse'
@@ -3649,9 +5777,9 @@ Write-Host "Using ALM4Dataverse ref: $ALM4DataverseRef" -ForegroundColor DarkGra
 # ─────────────────────────────────────────────────────────────
 Write-Section "Select GitHub Repository"
 
-Write-Host "Fetching repositories you have write access to..." -ForegroundColor Yellow
-
-$repos = @(Get-GitHubRepoList)
+$repos = @(Invoke-WithSpectreStatus -Status 'Fetching repositories you have write access to...' -ScriptBlock {
+    Get-GitHubRepoList
+})
 $selectedRepo = $null
 
 $repos = @($repos | Sort-Object -Property nameWithOwner)
@@ -3701,9 +5829,9 @@ Write-Section "Cloning Repository"
 
 Invoke-WithErrorHandling -OperationName "Cloning repository" -ScriptBlock {
     Write-Host "Cloning $repoFullName to $cloneRoot..." -ForegroundColor Yellow
-    & gh repo clone $repoFullName $cloneRoot -- --depth 1 2>&1 | Out-Host
+    & gh repo clone $repoFullName $cloneRoot -- --depth 1 2>&1
     if ($LASTEXITCODE -ne 0) { throw "gh repo clone failed." }
-}
+} -StatusMessage 'Cloning the selected repository...' -CaptureOutputInPanel | Out-Null
 
 Push-Location $cloneRoot
 try {
@@ -3719,12 +5847,45 @@ finally {
     Pop-Location
 }
 
-$existingSetupState = Get-GitHubRepositoryExistingSetupState `
-    -RepoRoot $cloneRoot `
-    -RepoOwner $repoOwner `
-    -RepoName $repoName `
-    -DefaultBranch $defaultBranch `
-    -TenantId $TenantId
+$existingSetupState = Invoke-WithSpectreStatus -Status 'Inspecting the existing repository configuration...' -ScriptBlock {
+    Get-GitHubRepositoryExistingSetupState `
+        -RepoRoot $cloneRoot `
+        -RepoOwner $repoOwner `
+        -RepoName $repoName `
+        -DefaultBranch $defaultBranch `
+        -TenantId $TenantId
+}
+
+$existingDevEnvironment = $existingSetupState.DevEnvironment
+$existingDevEnvironmentUrl = $null
+$existingDevEnvironmentCredentials = $null
+$existingDevEnvironmentServiceAccountUPN = $null
+
+if ($existingDevEnvironment) {
+    foreach ($urlPropertyName in @('Url', 'EnvironmentUrl', 'DataverseUrl', 'WebApplicationUrl')) {
+        if ($existingDevEnvironment.PSObject.Properties.Name -contains $urlPropertyName) {
+            $candidateUrl = ConvertTo-NormalizedEnvironmentUrl -Url $existingDevEnvironment.$urlPropertyName
+            if (-not [string]::IsNullOrWhiteSpace($candidateUrl)) {
+                $existingDevEnvironmentUrl = $candidateUrl
+                break
+            }
+        }
+    }
+
+    if ([string]::IsNullOrWhiteSpace($existingDevEnvironmentUrl) -and $existingDevEnvironment.PSObject.Properties.Name -contains 'Endpoints' -and $existingDevEnvironment.Endpoints) {
+        if ($existingDevEnvironment.Endpoints.ContainsKey('WebApplication')) {
+            $existingDevEnvironmentUrl = ConvertTo-NormalizedEnvironmentUrl -Url $existingDevEnvironment.Endpoints['WebApplication']
+        }
+    }
+
+    if ($existingDevEnvironment.PSObject.Properties.Name -contains 'Credentials') {
+        $existingDevEnvironmentCredentials = $existingDevEnvironment.Credentials
+    }
+
+    if ($existingDevEnvironment.PSObject.Properties.Name -contains 'ServiceAccountUPN') {
+        $existingDevEnvironmentServiceAccountUPN = $existingDevEnvironment.ServiceAccountUPN
+    }
+}
 
 if ($existingSetupState.SharedWorkflowRepository) {
     Write-Host "Existing shared workflow repository detected: $($existingSetupState.SharedWorkflowRepository)" -ForegroundColor DarkGray
@@ -3736,7 +5897,7 @@ if ($existingSetupState.SharedWorkflowReference) {
 # ─────────────────────────────────────────────────────────────
 Write-Section "Ensuring Shared Workflow Repository"
 
-$sharedWorkflowRepo = Invoke-WithErrorHandling -OperationName "Ensuring shared workflow repository fork" -ScriptBlock {
+$sharedWorkflowRepo = Invoke-WithErrorHandling -OperationName "Ensuring shared workflow repository" -ScriptBlock {
     Ensure-GitHubForkForSharedWorkflows `
         -UpstreamFullName $upstreamWorkflowRepoFullName `
         -ForkOwner $script:ghUser `
@@ -3759,8 +5920,9 @@ $enableEnvironmentApprovals = $false
 $environmentApprovalReviewerIds = @()
 $deploymentPromotionMode = 'manual-gate-tag'
 
-Write-Host "Checking GitHub environment and required-reviewer availability for '$repoFullName'..." -ForegroundColor Yellow
-$environmentCapabilities = Get-GitHubEnvironmentCapabilities -Owner $repoOwner -Repo $repoName -ApprovalReviewerId $script:ghUserId
+$environmentCapabilities = Invoke-WithSpectreStatus -Status "Checking GitHub environment capabilities for '$repoFullName'..." -ScriptBlock {
+    Get-GitHubEnvironmentCapabilities -Owner $repoOwner -Repo $repoName -ApprovalReviewerId $script:ghUserId
+}
 
 if ($existingSetupState.CredentialStorageScope -eq 'Environment' -and $environmentCapabilities.EnvironmentsAvailable) {
     $useGitHubEnvironments = $true
@@ -3838,7 +6000,15 @@ $repoPublishPlan = Get-RepoChangePublishPlan `
     -DocRelativePath 'docs/setup/github-setup.md' `
     -Ref $ALM4DataverseRef
 
-$deploymentEnvironments = @()
+$wizardState = [pscustomobject]@{
+    DeploymentEnvironments                  = @()
+    SolutionResult                          = $null
+    DevEnvUrl                               = $null
+    DevEnvFriendlyName                      = $null
+    ReuseExistingDevEnvironmentConfiguration = $false
+    DevEnvironmentConfiguration             = $null
+}
+$devEnvShortName = "Dev-$defaultBranch"
 $repoPublishResult = $null
 
 # ─────────────────────────────────────────────────────────────
@@ -3851,13 +6021,14 @@ try {
     }
 
     if ($repoPublishPlan.BranchName -ne $defaultBranch) {
-        & git checkout -B $repoPublishPlan.BranchName 2>&1 | Out-Host
+        & git checkout -B $repoPublishPlan.BranchName 2>&1 | Out-Null
         if ($LASTEXITCODE -ne 0) {
             throw "Failed to create or switch to working branch '$($repoPublishPlan.BranchName)'."
         }
     }
 
     # ─────────────────────────────────────────────────────────
+    Set-SetupPhaseContext -PhaseNames $script:setupPhaseNames -CurrentPhaseIndex 2
     Write-Section "Copy Workflow Templates"
 
     $copyRoot = $null
@@ -3874,7 +6045,7 @@ try {
         try {
             & git clone --depth 1 --branch $ALM4DataverseRef `
                 $upstreamGitSource `
-                $upstreamClone 2>&1 | Out-Host
+                $upstreamClone 2>&1 | Out-Null
             if ($LASTEXITCODE -ne 0) { throw "Failed to clone ALM4Dataverse templates." }
             $copyRoot = Join-Path $upstreamClone 'copy-to-your-repo'
         }
@@ -3883,260 +6054,375 @@ try {
         }
     }
 
-    Invoke-WithErrorHandling -OperationName "Copying workflow templates" -ScriptBlock {
+    Invoke-WithErrorHandling -OperationName "Copying workflow templates" -StatusMessage 'Copying workflow templates into your repository...' -ScriptBlock {
         Copy-WorkflowTemplatesToRepo `
             -SourceRoot $copyRoot `
             -TargetRoot $cloneRoot `
             -Branch $defaultBranch `
             -SharedWorkflowRepository $sharedWorkflowRepository `
             -SharedWorkflowRef $sharedWorkflowReference
-    } | Out-Null
+    } -CaptureOutputInPanel | Out-Null
 
-    # ─────────────────────────────────────────────────────────
-    Write-Section "Configure Solutions (alm-config.psd1)"
+    Invoke-SetupWizard -Title 'GitHub Actions ALM4Dataverse setup' -Steps @(
+        [pscustomobject]@{
+            Name = 'Configure solutions'
+            Action = {
+                Write-Section 'Configure Solutions (alm-config.psd1)'
 
-    $solutionResult = Invoke-WithErrorHandling -OperationName "Selecting solutions" -ScriptBlock {
-        $existingConfigPath = Join-Path $cloneRoot 'alm-config.psd1'
-        Get-DataverseSolutionsSelection -ExistingConfigPath $existingConfigPath -ExistingEnvironmentUrl $existingSetupState.DevEnvironment.Url -ExistingEnvironmentConfiguration $existingSetupState.DevEnvironment
-    }
-
-    if ($solutionResult -and $solutionResult.Solutions.Count -gt 0) {
-        Invoke-WithErrorHandling -OperationName "Updating alm-config.psd1" -ScriptBlock {
-            Update-AlmConfigInRepoClone -Solutions $solutionResult.Solutions -RepoRoot $cloneRoot
-        } | Out-Null
-    }
-
-    $devEnvUrl = if ($solutionResult) { $solutionResult.EnvironmentUrl } else { $null }
-    $devEnvFriendlyName = if ($solutionResult) { $solutionResult.EnvironmentFriendlyName } else { $null }
-    $reuseExistingDevEnvironmentConfiguration = if ($solutionResult) { [bool]$solutionResult.ReuseExistingConfiguration } else { $false }
-
-    # ─────────────────────────────────────────────────────────
-    Write-Section "Configure Deployment Workflow"
-
-    $initialDeploymentEnvironments = @()
-    foreach ($existingDeploymentEnvironment in @($existingSetupState.DeploymentEnvironments)) {
-        if ([string]::IsNullOrWhiteSpace($existingDeploymentEnvironment.ShortName)) {
-            continue
-        }
-
-        $existingEnvironmentUrl = ConvertTo-NormalizedEnvironmentUrl -Url $existingDeploymentEnvironment.Url
-        if ($existingEnvironmentUrl -and $existingEnvironmentUrl -ieq $devEnvUrl) {
-            Write-Warning "Skipping existing deployment stage '$($existingDeploymentEnvironment.ShortName)' because it points at the selected DEV environment URL."
-            continue
-        }
-
-        $initialDeploymentEnvironments += [pscustomobject]@{
-            ShortName            = $existingDeploymentEnvironment.ShortName
-            FriendlyName         = $existingDeploymentEnvironment.FriendlyName
-            Url                  = $existingEnvironmentUrl
-            Credentials          = $existingDeploymentEnvironment.Credentials
-            ServiceAccountUPN    = $existingDeploymentEnvironment.ServiceAccountUPN
-            ConfigurationPending = (($null -eq $existingDeploymentEnvironment.Credentials) -or [string]::IsNullOrWhiteSpace($existingDeploymentEnvironment.ServiceAccountUPN))
-        }
-    }
-
-    $deploymentEnvironments = Invoke-WithErrorHandling -OperationName "Selecting deployment environments" -ScriptBlock {
-        Select-ConfiguredDeploymentEnvironments `
-            -InitialEnvironments $initialDeploymentEnvironments `
-            -Heading 'Target Deployment Environments' `
-            -Title 'Manage deployment environments' `
-            -GuidanceLines @(
-                "Add each target Dataverse environment together with the App Registration and service account that will be used for that stage.",
-                "The table shows the full deployment configuration before DEPLOY-$defaultBranch.yml is regenerated, so you can verify URLs, authentication choices, and service-account ownership in one place.",
-                'Best practice: keep short names stable and list environments in promotion order (for example TEST, UAT, PROD) because that sequence becomes the deployment stage chain.'
-            ) `
-            -DocRelativePath 'docs/setup/github-setup.md' `
-            -Ref $ALM4DataverseRef `
-            -AddEnvironmentScriptBlock {
-                param($currentSelections)
-
-                $selectedEnv = Select-DataverseEnvironment -Prompt 'Select a Dataverse environment for deployment' -ExcludeUrl $devEnvUrl
-                if (-not $selectedEnv) {
-                    return $null
+                $wizardState.SolutionResult = Invoke-WithErrorHandling -OperationName 'Selecting solutions' -ScriptBlock {
+                    $existingConfigPath = Join-Path $cloneRoot 'alm-config.psd1'
+                    Get-DataverseSolutionsSelection -ExistingConfigPath $existingConfigPath -ExistingEnvironmentUrl $existingDevEnvironmentUrl -ExistingEnvironmentConfiguration $existingDevEnvironment
                 }
 
-                $url = ConvertTo-NormalizedEnvironmentUrl -Url $selectedEnv.Endpoints['WebApplication']
-                if ($currentSelections | Where-Object { $_.Url -ieq $url }) {
-                    Write-Host 'An environment with that URL is already selected.' -ForegroundColor Red
-                    Start-Sleep -Seconds 2
-                    return $null
-                }
+                $wizardState.DevEnvUrl = if ($wizardState.SolutionResult) { $wizardState.SolutionResult.EnvironmentUrl } else { $null }
+                $wizardState.DevEnvFriendlyName = if ($wizardState.SolutionResult) { $wizardState.SolutionResult.EnvironmentFriendlyName } else { $null }
+                $wizardState.ReuseExistingDevEnvironmentConfiguration = if ($wizardState.SolutionResult) { [bool]$wizardState.SolutionResult.ReuseExistingConfiguration } else { $false }
 
-                Write-Host 'Use a short deployment environment name (for example: TEST, UAT, PROD).' -ForegroundColor DarkGray
-                $shortName = Read-TextWithDefault -Prompt 'Enter a short name for this environment' -DefaultValue ''
-                if ($currentSelections | Where-Object { $_.ShortName -ieq $shortName }) {
-                    Write-Host 'An environment with that short name is already selected.' -ForegroundColor Red
-                    Start-Sleep -Seconds 2
-                    return $null
-                }
+                Invoke-WithErrorHandling -OperationName 'Updating alm-config.psd1' -StatusMessage 'Updating alm-config.psd1 with the selected solutions...' -ScriptBlock {
+                    Update-AlmConfigInRepoClone -Solutions @($wizardState.SolutionResult.Solutions) -RepoRoot $cloneRoot
+                } -CaptureOutputInPanel | Out-Null
+            }
+        },
+        [pscustomobject]@{
+            Name = 'Configure DEV credentials'
+            Action = {
+                Write-Section 'Configure Dev Environment Credentials'
 
-                $environmentConfiguration = Get-GitHubEnvironmentConfiguration `
-                    -EnvironmentName $shortName `
-                    -EnvironmentUrl $url `
-                    -FriendlyName $selectedEnv.FriendlyName `
-                    -ExistingCredentials $script:cachedCredentials `
-                    -ExistingServiceAccounts $script:cachedServiceAccounts `
-                    -TenantId $TenantId `
-                    -RepoName $repoName
-
-                if (-not ($script:cachedCredentials | Where-Object { $_.ApplicationId -eq $environmentConfiguration.Credentials.ApplicationId -and $_.TenantId -eq $environmentConfiguration.Credentials.TenantId })) {
-                    $script:cachedCredentials += $environmentConfiguration.Credentials
+                if ($useGitHubEnvironments) {
+                    Write-Host "Preparing GitHub environment '$devEnvShortName' for the DEV Dataverse environment." -ForegroundColor Green
                 }
-                if ($script:cachedServiceAccounts -notcontains $environmentConfiguration.ServiceAccountUPN) {
-                    $script:cachedServiceAccounts += $environmentConfiguration.ServiceAccountUPN
+                else {
+                    Write-Host "Preparing prefixed repo-level credentials for DEV environment '$devEnvShortName'." -ForegroundColor Green
                 }
+                Write-Host ''
 
-                return [pscustomobject]@{
-                    ShortName            = $environmentConfiguration.ShortName
-                    FriendlyName         = $environmentConfiguration.FriendlyName
-                    Url                  = $environmentConfiguration.Url
-                    Credentials          = $environmentConfiguration.Credentials
-                    ServiceAccountUPN    = $environmentConfiguration.ServiceAccountUPN
-                    ConfigurationPending = $false
-                }
-            } `
-            -EditEnvironmentScriptBlock {
-                param($currentSelections, $environmentToEdit, $environmentIndex)
-
-                $otherSelections = @()
-                for ($selectionIndex = 0; $selectionIndex -lt $currentSelections.Count; $selectionIndex++) {
-                    if ($selectionIndex -ne $environmentIndex) {
-                        $otherSelections += $currentSelections[$selectionIndex]
+                if (-not $wizardState.DevEnvUrl) {
+                    $existingDevEnvironmentSummary = Get-GitHubExistingEnvironmentSelectionSummary -ExistingEnvironment $existingDevEnvironment
+                    $devEnvSelection = Select-DataverseEnvironment -Prompt 'Select your DEV Dataverse environment' -PreferredUrl $existingDevEnvironmentUrl -PreferredSelectionSummary $existingDevEnvironmentSummary
+                    if ($devEnvSelection) {
+                        $wizardState.DevEnvUrl = ConvertTo-NormalizedEnvironmentUrl -Url $devEnvSelection.Endpoints['WebApplication']
+                        $wizardState.DevEnvFriendlyName = $devEnvSelection.FriendlyName
+                        $wizardState.ReuseExistingDevEnvironmentConfiguration = (
+                            ($devEnvSelection.PSObject.Properties.Name -contains 'UseExistingConfiguration' -and $devEnvSelection.UseExistingConfiguration) -or
+                            (
+                                -not [string]::IsNullOrWhiteSpace($existingDevEnvironmentUrl) -and
+                                $wizardState.DevEnvUrl -ieq $existingDevEnvironmentUrl
+                            )
+                        )
                     }
                 }
 
-                $currentUrl = ConvertTo-NormalizedEnvironmentUrl -Url $environmentToEdit.Url
-                $selectedEnv = Select-DataverseEnvironment -Prompt "Select the Dataverse environment for '$($environmentToEdit.ShortName)'" -ExcludeUrl $devEnvUrl -PreferredUrl $currentUrl
-                if (-not $selectedEnv) {
-                    return $null
+                if (-not $wizardState.DevEnvUrl) {
+                    [Spectre.Console.AnsiConsole]::MarkupLine('[yellow]No DEV environment is currently selected, so there is nothing to configure for this step yet.[/]')
+                    $wizardState.DevEnvironmentConfiguration = $null
+                    return
                 }
 
-                $url = ConvertTo-NormalizedEnvironmentUrl -Url $selectedEnv.Endpoints['WebApplication']
-                if ($otherSelections | Where-Object { $_.Url -ieq $url }) {
-                    Write-Host 'An environment with that URL is already selected.' -ForegroundColor Red
-                    Start-Sleep -Seconds 2
-                    return $null
+                $canReuseExistingDevConfiguration = (
+                    $wizardState.ReuseExistingDevEnvironmentConfiguration -and
+                    $existingDevEnvironment -and
+                    $existingDevEnvironmentCredentials -and
+                    -not [string]::IsNullOrWhiteSpace($existingDevEnvironmentServiceAccountUPN)
+                )
+
+                if ($canReuseExistingDevConfiguration) {
+                    Write-Host 'Using the existing DEV environment credentials and service account you selected from the menu.' -ForegroundColor Green
+                    $wizardState.DevEnvironmentConfiguration = [pscustomobject]@{
+                        ShortName         = $devEnvShortName
+                        FriendlyName      = $(if ([string]::IsNullOrWhiteSpace($wizardState.DevEnvFriendlyName)) { $devEnvShortName } else { $wizardState.DevEnvFriendlyName })
+                        Url               = (ConvertTo-NormalizedEnvironmentUrl -Url $wizardState.DevEnvUrl)
+                        Credentials       = $existingDevEnvironmentCredentials
+                        ServiceAccountUPN = $existingDevEnvironmentServiceAccountUPN
+                    }
+                }
+                else {
+                    if ($wizardState.ReuseExistingDevEnvironmentConfiguration -and -not $canReuseExistingDevConfiguration) {
+                        Write-Warning 'The existing DEV environment entry is missing either credentials or service account information, so setup needs to ask for the missing details.'
+                    }
+
+                    $wizardState.DevEnvironmentConfiguration = Invoke-WithErrorHandling -OperationName 'Selecting DEV credentials' -ScriptBlock {
+                        Get-GitHubEnvironmentConfiguration `
+                            -EnvironmentName $devEnvShortName `
+                            -EnvironmentUrl $wizardState.DevEnvUrl `
+                            -FriendlyName $wizardState.DevEnvFriendlyName `
+                            -ExistingCredentials $script:cachedCredentials `
+                            -ExistingServiceAccounts $script:cachedServiceAccounts `
+                            -TenantId $TenantId `
+                            -RepoName $repoName `
+                            -ExistingCredential $existingDevEnvironmentCredentials `
+                            -ExistingServiceAccountUPN $existingDevEnvironmentServiceAccountUPN
+                    }
                 }
 
-                Write-Host 'Use a short deployment environment name (for example: TEST, UAT, PROD).' -ForegroundColor DarkGray
-                $shortName = Read-TextWithDefault -Prompt 'Enter a short name for this environment' -DefaultValue $environmentToEdit.ShortName
-                if ($otherSelections | Where-Object { $_.ShortName -ieq $shortName }) {
-                    Write-Host 'An environment with that short name is already selected.' -ForegroundColor Red
-                    Start-Sleep -Seconds 2
-                    return $null
+                if ($wizardState.DevEnvironmentConfiguration -and -not ($script:cachedCredentials | Where-Object { $_.ApplicationId -eq $wizardState.DevEnvironmentConfiguration.Credentials.ApplicationId -and $_.TenantId -eq $wizardState.DevEnvironmentConfiguration.Credentials.TenantId })) {
+                    $script:cachedCredentials += $wizardState.DevEnvironmentConfiguration.Credentials
                 }
-
-                $currentCredentials = @($script:cachedCredentials)
-                $currentCredentials += @($otherSelections | ForEach-Object { $_.Credentials } | Where-Object { $null -ne $_ })
-                $currentServiceAccounts = @($script:cachedServiceAccounts)
-                $currentServiceAccounts += @($otherSelections | ForEach-Object { $_.ServiceAccountUPN } | Where-Object { -not [string]::IsNullOrWhiteSpace($_) })
-
-                $environmentConfiguration = Get-GitHubEnvironmentConfiguration `
-                    -EnvironmentName $shortName `
-                    -EnvironmentUrl $url `
-                    -FriendlyName $selectedEnv.FriendlyName `
-                    -ExistingCredentials $currentCredentials `
-                    -ExistingServiceAccounts $currentServiceAccounts `
-                    -TenantId $TenantId `
-                    -RepoName $repoName `
-                    -ExistingCredential $environmentToEdit.Credentials `
-                    -ExistingServiceAccountUPN $environmentToEdit.ServiceAccountUPN
-
-                if (-not ($script:cachedCredentials | Where-Object { $_.ApplicationId -eq $environmentConfiguration.Credentials.ApplicationId -and $_.TenantId -eq $environmentConfiguration.Credentials.TenantId })) {
-                    $script:cachedCredentials += $environmentConfiguration.Credentials
-                }
-                if ($script:cachedServiceAccounts -notcontains $environmentConfiguration.ServiceAccountUPN) {
-                    $script:cachedServiceAccounts += $environmentConfiguration.ServiceAccountUPN
-                }
-
-                return [pscustomobject]@{
-                    ShortName            = $environmentConfiguration.ShortName
-                    FriendlyName         = $environmentConfiguration.FriendlyName
-                    Url                  = $environmentConfiguration.Url
-                    Credentials          = $environmentConfiguration.Credentials
-                    ServiceAccountUPN    = $environmentConfiguration.ServiceAccountUPN
-                    ConfigurationPending = $false
+                if ($wizardState.DevEnvironmentConfiguration -and $script:cachedServiceAccounts -notcontains $wizardState.DevEnvironmentConfiguration.ServiceAccountUPN) {
+                    $script:cachedServiceAccounts += $wizardState.DevEnvironmentConfiguration.ServiceAccountUPN
                 }
             }
+        },
+        [pscustomobject]@{
+            Name = 'Configure deployment workflow'
+            Action = {
+                Write-Section 'Configure Deployment Workflow'
+
+                $initialDeploymentEnvironments = @()
+                foreach ($existingDeploymentEnvironment in @($existingSetupState.DeploymentEnvironments)) {
+                    if ([string]::IsNullOrWhiteSpace($existingDeploymentEnvironment.ShortName)) {
+                        continue
+                    }
+
+                    $existingEnvironmentUrl = ConvertTo-NormalizedEnvironmentUrl -Url $existingDeploymentEnvironment.Url
+                    if ($existingEnvironmentUrl -and $existingEnvironmentUrl -ieq $wizardState.DevEnvUrl) {
+                        Write-Warning "Skipping existing deployment stage '$($existingDeploymentEnvironment.ShortName)' because it points at the selected DEV environment URL."
+                        continue
+                    }
+
+                    $initialDeploymentEnvironments += [pscustomobject]@{
+                        ShortName            = $existingDeploymentEnvironment.ShortName
+                        FriendlyName         = $existingDeploymentEnvironment.FriendlyName
+                        Url                  = $existingEnvironmentUrl
+                        Credentials          = $existingDeploymentEnvironment.Credentials
+                        ServiceAccountUPN    = $existingDeploymentEnvironment.ServiceAccountUPN
+                        ConfigurationPending = (($null -eq $existingDeploymentEnvironment.Credentials) -or [string]::IsNullOrWhiteSpace($existingDeploymentEnvironment.ServiceAccountUPN))
+                    }
+                }
+
+                $wizardState.DeploymentEnvironments = @(Invoke-WithErrorHandling -OperationName 'Selecting deployment environments' -ScriptBlock {
+                    Select-ConfiguredDeploymentEnvironments `
+                        -InitialEnvironments $initialDeploymentEnvironments `
+                        -Heading 'Target Deployment Environments' `
+                        -Title 'Manage deployment environments' `
+                        -GuidanceLines @(
+                            'Add each target Dataverse environment together with the App Registration and service account that will be used for that stage.',
+                            "The table shows the full deployment configuration before DEPLOY-$defaultBranch.yml is regenerated, so you can verify URLs, authentication choices, and service-account ownership in one place.",
+                            'Best practice: keep short names stable and list environments in promotion order (for example TEST, UAT, PROD) because that sequence becomes the deployment stage chain.'
+                        ) `
+                        -DocRelativePath 'docs/setup/github-setup.md' `
+                        -Ref $ALM4DataverseRef `
+                        -AddEnvironmentScriptBlock {
+                            param($currentSelections)
+
+                            $selectedEnv = Select-DataverseEnvironment -Prompt 'Select a Dataverse environment for deployment' -ExcludeUrl $wizardState.DevEnvUrl
+                            if (-not $selectedEnv) {
+                                return $null
+                            }
+
+                            $url = ConvertTo-NormalizedEnvironmentUrl -Url $selectedEnv.Endpoints['WebApplication']
+                            if ($currentSelections | Where-Object { $_.Url -ieq $url }) {
+                                Write-Host 'An environment with that URL is already selected.' -ForegroundColor Red
+                                return $null
+                            }
+
+                            Write-Host 'Use a short deployment environment name (for example: TEST, UAT, PROD).' -ForegroundColor DarkGray
+                            $shortName = Read-TextWithDefault -Prompt 'Enter a short name for this environment' -DefaultValue ''
+                            if ($currentSelections | Where-Object { $_.ShortName -ieq $shortName }) {
+                                Write-Host 'An environment with that short name is already selected.' -ForegroundColor Red
+                                return $null
+                            }
+
+                            $environmentConfiguration = Get-GitHubEnvironmentConfiguration `
+                                -EnvironmentName $shortName `
+                                -EnvironmentUrl $url `
+                                -FriendlyName $selectedEnv.FriendlyName `
+                                -ExistingCredentials $script:cachedCredentials `
+                                -ExistingServiceAccounts $script:cachedServiceAccounts `
+                                -TenantId $TenantId `
+                                -RepoName $repoName
+
+                            if (-not ($script:cachedCredentials | Where-Object { $_.ApplicationId -eq $environmentConfiguration.Credentials.ApplicationId -and $_.TenantId -eq $environmentConfiguration.Credentials.TenantId })) {
+                                $script:cachedCredentials += $environmentConfiguration.Credentials
+                            }
+                            if ($script:cachedServiceAccounts -notcontains $environmentConfiguration.ServiceAccountUPN) {
+                                $script:cachedServiceAccounts += $environmentConfiguration.ServiceAccountUPN
+                            }
+
+                            return [pscustomobject]@{
+                                ShortName            = $environmentConfiguration.ShortName
+                                FriendlyName         = $environmentConfiguration.FriendlyName
+                                Url                  = $environmentConfiguration.Url
+                                Credentials          = $environmentConfiguration.Credentials
+                                ServiceAccountUPN    = $environmentConfiguration.ServiceAccountUPN
+                                ConfigurationPending = $false
+                            }
+                        } `
+                        -EditEnvironmentScriptBlock {
+                            param($currentSelections, $environmentToEdit, $environmentIndex)
+
+                            $otherSelections = @()
+                            for ($selectionIndex = 0; $selectionIndex -lt $currentSelections.Count; $selectionIndex++) {
+                                if ($selectionIndex -ne $environmentIndex) {
+                                    $otherSelections += $currentSelections[$selectionIndex]
+                                }
+                            }
+
+                            $currentUrl = ConvertTo-NormalizedEnvironmentUrl -Url $environmentToEdit.Url
+                            $selectedEnv = Select-DataverseEnvironment -Prompt "Select the Dataverse environment for '$($environmentToEdit.ShortName)'" -ExcludeUrl $wizardState.DevEnvUrl -PreferredUrl $currentUrl
+                            if (-not $selectedEnv) {
+                                return $null
+                            }
+
+                            $url = ConvertTo-NormalizedEnvironmentUrl -Url $selectedEnv.Endpoints['WebApplication']
+                            if ($otherSelections | Where-Object { $_.Url -ieq $url }) {
+                                Write-Host 'An environment with that URL is already selected.' -ForegroundColor Red
+                                return $null
+                            }
+
+                            Write-Host 'Use a short deployment environment name (for example: TEST, UAT, PROD).' -ForegroundColor DarkGray
+                            $shortName = Read-TextWithDefault -Prompt 'Enter a short name for this environment' -DefaultValue $environmentToEdit.ShortName
+                            if ($otherSelections | Where-Object { $_.ShortName -ieq $shortName }) {
+                                Write-Host 'An environment with that short name is already selected.' -ForegroundColor Red
+                                return $null
+                            }
+
+                            $currentCredentials = @($script:cachedCredentials)
+                            $currentCredentials += @($otherSelections | ForEach-Object { $_.Credentials } | Where-Object { $null -ne $_ })
+                            $currentServiceAccounts = @($script:cachedServiceAccounts)
+                            $currentServiceAccounts += @($otherSelections | ForEach-Object { $_.ServiceAccountUPN } | Where-Object { -not [string]::IsNullOrWhiteSpace($_) })
+
+                            $environmentConfiguration = Get-GitHubEnvironmentConfiguration `
+                                -EnvironmentName $shortName `
+                                -EnvironmentUrl $url `
+                                -FriendlyName $selectedEnv.FriendlyName `
+                                -ExistingCredentials $currentCredentials `
+                                -ExistingServiceAccounts $currentServiceAccounts `
+                                -TenantId $TenantId `
+                                -RepoName $repoName `
+                                -ExistingCredential $environmentToEdit.Credentials `
+                                -ExistingServiceAccountUPN $environmentToEdit.ServiceAccountUPN
+
+                            if (-not ($script:cachedCredentials | Where-Object { $_.ApplicationId -eq $environmentConfiguration.Credentials.ApplicationId -and $_.TenantId -eq $environmentConfiguration.Credentials.TenantId })) {
+                                $script:cachedCredentials += $environmentConfiguration.Credentials
+                            }
+                            if ($script:cachedServiceAccounts -notcontains $environmentConfiguration.ServiceAccountUPN) {
+                                $script:cachedServiceAccounts += $environmentConfiguration.ServiceAccountUPN
+                            }
+
+                            return [pscustomobject]@{
+                                ShortName            = $environmentConfiguration.ShortName
+                                FriendlyName         = $environmentConfiguration.FriendlyName
+                                Url                  = $environmentConfiguration.Url
+                                Credentials          = $environmentConfiguration.Credentials
+                                ServiceAccountUPN    = $environmentConfiguration.ServiceAccountUPN
+                                ConfigurationPending = $false
+                            }
+                        }
+                })
+
+                $resolvedDeploymentEnvironments = @()
+                foreach ($selectedDeploymentEnvironment in @($wizardState.DeploymentEnvironments)) {
+                    if ([string]::IsNullOrWhiteSpace($selectedDeploymentEnvironment.ShortName)) {
+                        continue
+                    }
+
+                    $resolvedEnvironmentUrl = ConvertTo-NormalizedEnvironmentUrl -Url $selectedDeploymentEnvironment.Url
+                    $resolvedFriendlyName = if ([string]::IsNullOrWhiteSpace($selectedDeploymentEnvironment.FriendlyName)) { $selectedDeploymentEnvironment.ShortName } else { $selectedDeploymentEnvironment.FriendlyName }
+
+                    if ([string]::IsNullOrWhiteSpace($resolvedEnvironmentUrl)) {
+                        $resolvedEnvironment = Select-DataverseEnvironment -Prompt "Resolve the Dataverse environment for existing deployment stage '$($selectedDeploymentEnvironment.ShortName)'" -ExcludeUrl $wizardState.DevEnvUrl -PreferredUrl $selectedDeploymentEnvironment.Url
+                        if (-not $resolvedEnvironment) {
+                            throw "No Dataverse environment selected for existing deployment stage '$($selectedDeploymentEnvironment.ShortName)'."
+                        }
+
+                        $resolvedEnvironmentUrl = ConvertTo-NormalizedEnvironmentUrl -Url $resolvedEnvironment.Endpoints['WebApplication']
+                        $resolvedFriendlyName = $resolvedEnvironment.FriendlyName
+                    }
+
+                    if ($resolvedEnvironmentUrl -and $resolvedEnvironmentUrl -ieq $wizardState.DevEnvUrl) {
+                        Write-Warning "Skipping deployment environment '$($selectedDeploymentEnvironment.ShortName)' because it points at the selected DEV environment URL."
+                        continue
+                    }
+
+                    $needsConfiguration = (
+                        ($selectedDeploymentEnvironment.PSObject.Properties.Name -contains 'ConfigurationPending' -and $selectedDeploymentEnvironment.ConfigurationPending) -or
+                        ($null -eq $selectedDeploymentEnvironment.Credentials) -or
+                        [string]::IsNullOrWhiteSpace($selectedDeploymentEnvironment.ServiceAccountUPN)
+                    )
+
+                    if ($needsConfiguration) {
+                        Write-Host "Completing configuration for existing deployment environment '$($selectedDeploymentEnvironment.ShortName)'..." -ForegroundColor Yellow
+                        $completedEnvironment = Get-GitHubEnvironmentConfiguration `
+                            -EnvironmentName $selectedDeploymentEnvironment.ShortName `
+                            -EnvironmentUrl $resolvedEnvironmentUrl `
+                            -FriendlyName $resolvedFriendlyName `
+                            -ExistingCredentials $script:cachedCredentials `
+                            -ExistingServiceAccounts $script:cachedServiceAccounts `
+                            -TenantId $TenantId `
+                            -RepoName $repoName `
+                            -ExistingCredential $selectedDeploymentEnvironment.Credentials `
+                            -ExistingServiceAccountUPN $selectedDeploymentEnvironment.ServiceAccountUPN
+                    }
+                    else {
+                        $completedEnvironment = [pscustomobject]@{
+                            ShortName         = $selectedDeploymentEnvironment.ShortName
+                            FriendlyName      = $resolvedFriendlyName
+                            Url               = $resolvedEnvironmentUrl
+                            Credentials       = $selectedDeploymentEnvironment.Credentials
+                            ServiceAccountUPN = $selectedDeploymentEnvironment.ServiceAccountUPN
+                        }
+                    }
+
+                    $resolvedDeploymentEnvironments += $completedEnvironment
+                    if ($completedEnvironment.Credentials -and -not ($script:cachedCredentials | Where-Object { $_.ApplicationId -eq $completedEnvironment.Credentials.ApplicationId -and $_.TenantId -eq $completedEnvironment.Credentials.TenantId })) {
+                        $script:cachedCredentials += $completedEnvironment.Credentials
+                    }
+                    if (-not [string]::IsNullOrWhiteSpace($completedEnvironment.ServiceAccountUPN) -and $script:cachedServiceAccounts -notcontains $completedEnvironment.ServiceAccountUPN) {
+                        $script:cachedServiceAccounts += $completedEnvironment.ServiceAccountUPN
+                    }
+                }
+
+                $wizardState.DeploymentEnvironments = @($resolvedDeploymentEnvironments)
+
+                Invoke-WithErrorHandling -OperationName 'Updating DEPLOY workflow' -StatusMessage 'Regenerating the DEPLOY workflow for the selected environments...' -ScriptBlock {
+                    Update-DeployWorkflowInRepoClone `
+                        -RepoRoot $cloneRoot `
+                        -Branch $defaultBranch `
+                        -DeploymentEnvironments $wizardState.DeploymentEnvironments `
+                        -SharedWorkflowRepository $sharedWorkflowRepository `
+                        -SharedWorkflowRef $sharedWorkflowReference `
+                        -PromotionMode $deploymentPromotionMode
+                } -CaptureOutputInPanel | Out-Null
+            }
+        },
+        [pscustomobject]@{
+            Name = 'Review choices'
+            Action = {
+                Write-Section 'Review setup choices'
+
+                $allConfiguredEnvironments = @()
+                if ($wizardState.DevEnvironmentConfiguration) {
+                    $allConfiguredEnvironments += $wizardState.DevEnvironmentConfiguration
+                }
+                $allConfiguredEnvironments += @($wizardState.DeploymentEnvironments)
+
+                Show-KeyValueSummaryTable -Heading 'Setup review' -Values ([ordered]@{
+                    'Repository'                = $repoFullName
+                    'Shared workflow source'    = $sharedWorkflowRepository
+                    'Shared workflow ref'       = $sharedWorkflowReference
+                    'Credential storage'        = $(if ($useGitHubEnvironments) { 'GitHub environments' } else { 'Prefixed repository variables/secrets' })
+                    'Promotion mode'            = $deploymentPromotionMode
+                    'Publish mode'              = $(if ($repoPublishPlan.Mode -eq 'PullRequest') { "Pull request into $($repoPublishPlan.TargetBranch) from $($repoPublishPlan.BranchName)" } else { "Direct commit to $($repoPublishPlan.BranchName)" })
+                    'Deployment environments'   = [string]$wizardState.DeploymentEnvironments.Count
+                })
+
+                Show-EnvironmentConfigurationTable -EnvironmentConfigurations $allConfiguredEnvironments
+                Confirm-SetupReviewAction
+            }
+        }
+    )
+
+    $solutionResult = $wizardState.SolutionResult
+    $devEnvUrl = $wizardState.DevEnvUrl
+    $devEnvFriendlyName = $wizardState.DevEnvFriendlyName
+    $reuseExistingDevEnvironmentConfiguration = $wizardState.ReuseExistingDevEnvironmentConfiguration
+    $devEnvironmentConfiguration = $wizardState.DevEnvironmentConfiguration
+    $deploymentEnvironments = @($wizardState.DeploymentEnvironments)
+
+    Set-SetupPhaseContext -PhaseNames $script:setupPhaseNames -CurrentPhaseIndex 2
+    $repoPublishResult = Invoke-WithErrorHandling -OperationName 'Publishing GitHub repository changes' -StatusMessage 'Publishing repository changes to GitHub...' -CaptureOutputInPanel -ScriptBlock {
+        Publish-GitHubRepoChanges -RepoRoot $cloneRoot -PublishPlan $repoPublishPlan
     }
-
-    $resolvedDeploymentEnvironments = @()
-    foreach ($selectedDeploymentEnvironment in @($deploymentEnvironments)) {
-        if ([string]::IsNullOrWhiteSpace($selectedDeploymentEnvironment.ShortName)) {
-            continue
-        }
-
-        $resolvedEnvironmentUrl = ConvertTo-NormalizedEnvironmentUrl -Url $selectedDeploymentEnvironment.Url
-        $resolvedFriendlyName = if ([string]::IsNullOrWhiteSpace($selectedDeploymentEnvironment.FriendlyName)) { $selectedDeploymentEnvironment.ShortName } else { $selectedDeploymentEnvironment.FriendlyName }
-
-        if ([string]::IsNullOrWhiteSpace($resolvedEnvironmentUrl)) {
-            $resolvedEnvironment = Select-DataverseEnvironment -Prompt "Resolve the Dataverse environment for existing deployment stage '$($selectedDeploymentEnvironment.ShortName)'" -ExcludeUrl $devEnvUrl -PreferredUrl $selectedDeploymentEnvironment.Url
-            if (-not $resolvedEnvironment) {
-                throw "No Dataverse environment selected for existing deployment stage '$($selectedDeploymentEnvironment.ShortName)'."
-            }
-
-            $resolvedEnvironmentUrl = ConvertTo-NormalizedEnvironmentUrl -Url $resolvedEnvironment.Endpoints['WebApplication']
-            $resolvedFriendlyName = $resolvedEnvironment.FriendlyName
-        }
-
-        if ($resolvedEnvironmentUrl -and $resolvedEnvironmentUrl -ieq $devEnvUrl) {
-            Write-Warning "Skipping deployment environment '$($selectedDeploymentEnvironment.ShortName)' because it points at the selected DEV environment URL."
-            continue
-        }
-
-        $needsConfiguration = (
-            ($selectedDeploymentEnvironment.PSObject.Properties.Name -contains 'ConfigurationPending' -and $selectedDeploymentEnvironment.ConfigurationPending) -or
-            ($null -eq $selectedDeploymentEnvironment.Credentials) -or
-            [string]::IsNullOrWhiteSpace($selectedDeploymentEnvironment.ServiceAccountUPN)
-        )
-
-        if ($needsConfiguration) {
-            Write-Host "Completing configuration for existing deployment environment '$($selectedDeploymentEnvironment.ShortName)'..." -ForegroundColor Yellow
-            $completedEnvironment = Get-GitHubEnvironmentConfiguration `
-                -EnvironmentName $selectedDeploymentEnvironment.ShortName `
-                -EnvironmentUrl $resolvedEnvironmentUrl `
-                -FriendlyName $resolvedFriendlyName `
-                -ExistingCredentials $script:cachedCredentials `
-                -ExistingServiceAccounts $script:cachedServiceAccounts `
-                -TenantId $TenantId `
-                -RepoName $repoName `
-                -ExistingCredential $selectedDeploymentEnvironment.Credentials `
-                -ExistingServiceAccountUPN $selectedDeploymentEnvironment.ServiceAccountUPN
-        }
-        else {
-            $completedEnvironment = [pscustomobject]@{
-                ShortName         = $selectedDeploymentEnvironment.ShortName
-                FriendlyName      = $resolvedFriendlyName
-                Url               = $resolvedEnvironmentUrl
-                Credentials       = $selectedDeploymentEnvironment.Credentials
-                ServiceAccountUPN = $selectedDeploymentEnvironment.ServiceAccountUPN
-            }
-        }
-
-        $resolvedDeploymentEnvironments += $completedEnvironment
-        if ($completedEnvironment.Credentials -and -not ($script:cachedCredentials | Where-Object { $_.ApplicationId -eq $completedEnvironment.Credentials.ApplicationId -and $_.TenantId -eq $completedEnvironment.Credentials.TenantId })) {
-            $script:cachedCredentials += $completedEnvironment.Credentials
-        }
-        if (-not [string]::IsNullOrWhiteSpace($completedEnvironment.ServiceAccountUPN) -and $script:cachedServiceAccounts -notcontains $completedEnvironment.ServiceAccountUPN) {
-            $script:cachedServiceAccounts += $completedEnvironment.ServiceAccountUPN
-        }
-    }
-
-    $deploymentEnvironments = @($resolvedDeploymentEnvironments)
-
-    Invoke-WithErrorHandling -OperationName "Updating DEPLOY workflow" -ScriptBlock {
-        Update-DeployWorkflowInRepoClone `
-            -RepoRoot $cloneRoot `
-            -Branch $defaultBranch `
-            -DeploymentEnvironments $deploymentEnvironments `
-            -SharedWorkflowRepository $sharedWorkflowRepository `
-            -SharedWorkflowRef $sharedWorkflowReference `
-            -PromotionMode $deploymentPromotionMode
-    } | Out-Null
-
-    # ─────────────────────────────────────────────────────────
-    # Commit and push the workflow template + config changes
-    $repoPublishResult = Publish-GitHubRepoChanges -RepoRoot $cloneRoot -PublishPlan $repoPublishPlan
 }
 finally {
     Pop-Location
@@ -4144,9 +6430,9 @@ finally {
 }
 
 # ─────────────────────────────────────────────────────────────
+Set-SetupPhaseContext -PhaseNames $script:setupPhaseNames -CurrentPhaseIndex 3
 Write-Section "Configure Dev Environment Credentials"
 
-$devEnvShortName = "Dev-$defaultBranch"
 if ($useGitHubEnvironments) {
     Write-Host "Setting up GitHub environment '$devEnvShortName' for the DEV Dataverse environment." -ForegroundColor Green
 }
@@ -4155,61 +6441,8 @@ else {
 }
 Write-Host ""
 
-if (-not $devEnvUrl) {
-    $existingDevEnvironmentSummary = Get-GitHubExistingEnvironmentSelectionSummary -ExistingEnvironment $existingSetupState.DevEnvironment
-    $devEnvSelection = Select-DataverseEnvironment -Prompt "Select your DEV Dataverse environment" -PreferredUrl $existingSetupState.DevEnvironment.Url -PreferredSelectionSummary $existingDevEnvironmentSummary -KeepPreferredInList
-    if ($devEnvSelection) {
-        $devEnvUrl = ConvertTo-NormalizedEnvironmentUrl -Url $devEnvSelection.Endpoints["WebApplication"]
-        $devEnvFriendlyName = $devEnvSelection.FriendlyName
-        $reuseExistingDevEnvironmentConfiguration = ($devEnvSelection.PSObject.Properties.Name -contains 'UseExistingConfiguration' -and $devEnvSelection.UseExistingConfiguration)
-    }
-}
-
-if ($devEnvUrl) {
-    $canReuseExistingDevConfiguration = (
-        $reuseExistingDevEnvironmentConfiguration -and
-        $existingSetupState.DevEnvironment -and
-        $existingSetupState.DevEnvironment.Credentials -and
-        -not [string]::IsNullOrWhiteSpace($existingSetupState.DevEnvironment.ServiceAccountUPN)
-    )
-
-    if ($canReuseExistingDevConfiguration) {
-        Write-Host 'Using the existing DEV environment credentials and service account you selected from the menu.' -ForegroundColor Green
-        $devEnvironmentConfiguration = [pscustomobject]@{
-            ShortName         = $devEnvShortName
-            FriendlyName      = $(if ([string]::IsNullOrWhiteSpace($devEnvFriendlyName)) { $devEnvShortName } else { $devEnvFriendlyName })
-            Url               = (ConvertTo-NormalizedEnvironmentUrl -Url $devEnvUrl)
-            Credentials       = $existingSetupState.DevEnvironment.Credentials
-            ServiceAccountUPN = $existingSetupState.DevEnvironment.ServiceAccountUPN
-        }
-    }
-    else {
-        if ($reuseExistingDevEnvironmentConfiguration -and -not $canReuseExistingDevConfiguration) {
-            Write-Warning 'The existing DEV environment entry is missing either credentials or service account information, so setup needs to ask for the missing details.'
-        }
-
-        $devEnvironmentConfiguration = Invoke-WithErrorHandling -OperationName "Selecting DEV credentials" -ScriptBlock {
-            Get-GitHubEnvironmentConfiguration `
-                -EnvironmentName $devEnvShortName `
-                -EnvironmentUrl $devEnvUrl `
-                -FriendlyName $devEnvFriendlyName `
-                -ExistingCredentials $script:cachedCredentials `
-                -ExistingServiceAccounts $script:cachedServiceAccounts `
-                -TenantId $TenantId `
-                    -RepoName $repoName `
-                    -ExistingCredential $existingSetupState.DevEnvironment.Credentials `
-                    -ExistingServiceAccountUPN $existingSetupState.DevEnvironment.ServiceAccountUPN
-        }
-    }
-
-    if (-not ($script:cachedCredentials | Where-Object { $_.ApplicationId -eq $devEnvironmentConfiguration.Credentials.ApplicationId -and $_.TenantId -eq $devEnvironmentConfiguration.Credentials.TenantId })) {
-        $script:cachedCredentials += $devEnvironmentConfiguration.Credentials
-    }
-    if ($script:cachedServiceAccounts -notcontains $devEnvironmentConfiguration.ServiceAccountUPN) {
-        $script:cachedServiceAccounts += $devEnvironmentConfiguration.ServiceAccountUPN
-    }
-
-    Invoke-WithErrorHandling -OperationName "Setting up DEV credentials" -ScriptBlock {
+if ($devEnvironmentConfiguration) {
+    Invoke-WithErrorHandling -OperationName "Setting up DEV credentials" -StatusMessage 'Applying DEV environment credentials...' -CaptureOutputInPanel -ScriptBlock {
         Apply-GitHubEnvironmentConfiguration `
             -EnvironmentConfiguration $devEnvironmentConfiguration `
             -TenantId $TenantId `
@@ -4220,8 +6453,12 @@ if ($devEnvUrl) {
             -EnableApprovals:$false
     } | Out-Null
 }
+else {
+    [Spectre.Console.AnsiConsole]::MarkupLine('[yellow]No DEV environment credentials were configured in the wizard, so this step will be skipped.[/]')
+}
 
 # ─────────────────────────────────────────────────────────────
+Set-SetupPhaseContext -PhaseNames $script:setupPhaseNames -CurrentPhaseIndex 4
 Write-Section "Configure Deployment Environment Credentials"
 
 if ($useGitHubEnvironments) {
@@ -4240,7 +6477,8 @@ if ($deploymentEnvironments.Count -eq 0) {
     Write-Host "No deployment environments selected. You can run this script again to add them later." -ForegroundColor Yellow
 }
 else {
-    foreach ($env in $deploymentEnvironments) {
+    for ($envIndex = 0; $envIndex -lt $deploymentEnvironments.Count; $envIndex++) {
+        $env = $deploymentEnvironments[$envIndex]
         Write-Section "Applying environment configuration: $($env.ShortName)"
         Write-Host "Dataverse URL: $($env.Url)" -ForegroundColor DarkGray
         Write-Host ""
@@ -4255,27 +6493,29 @@ else {
                 -UseGitHubEnvironments $useGitHubEnvironments `
                 -EnableApprovals:$enableEnvironmentApprovals `
                 -RequiredReviewerIds $environmentApprovalReviewerIds
-        } | Out-Null
+        } -StatusMessage "Applying configuration for environment '$($env.ShortName)'..." -CaptureOutputInPanel | Out-Null
     }
 }
 
 # ─────────────────────────────────────────────────────────────
-Clear-Host
-Write-Host "Setup completed successfully!" -ForegroundColor Green
-Write-Host ""
-Write-Host "Access your GitHub repository at" -ForegroundColor Green
-Write-Host "https://github.com/$repoFullName/actions" -ForegroundColor Green
-Write-Host ""
-if ($repoPublishResult -and $repoPublishResult.Mode -eq 'PullRequest' -and -not [string]::IsNullOrWhiteSpace($repoPublishResult.PullRequestUrl)) {
-    Write-Host "Repository changes were pushed to branch '$($repoPublishResult.BranchName)' and a pull request was created:" -ForegroundColor Green
-    Write-Host $repoPublishResult.PullRequestUrl -ForegroundColor Green
-    Write-Host ""
-}
-elseif ($repoPublishResult -and $repoPublishResult.HasChanges) {
-    Write-Host "Repository changes were committed directly to '$($repoPublishResult.BranchName)'." -ForegroundColor Green
-    Write-Host ""
-}
-
-Write-Host "Next steps:" -ForegroundColor Green
-Write-Host (Get-Alm4DataverseDocUrl -RelativePath 'docs/setup/github-setup.md' -Ref $ALM4DataverseRef) -ForegroundColor Green
-Write-Host (Get-Alm4DataverseDocUrl -RelativePath 'docs/config/github-secrets.md' -Ref $ALM4DataverseRef) -ForegroundColor Green
+Set-SetupPhaseContext -PhaseNames $script:setupPhaseNames -CurrentPhaseIndex 4
+Show-SetupCompletionScreen `
+    -Heading 'GitHub Actions setup completed successfully!' `
+    -AccessLabel 'Open your GitHub Actions page' `
+    -AccessUrl "https://github.com/$repoFullName/actions" `
+    -SummaryValues ([ordered]@{
+        'Repository'              = $repoFullName
+        'Shared workflow source'  = $sharedWorkflowRepository
+        'Repository publish'      = $(if ($repoPublishResult -and $repoPublishResult.Mode -eq 'PullRequest' -and $repoPublishResult.HasChanges) { "Pull request created from $($repoPublishResult.BranchName) to $($repoPublishResult.TargetBranch) (merge required)" } elseif ($repoPublishResult -and $repoPublishResult.Mode -eq 'PullRequest') { "Pull request mode selected, but no repository changes were detected so no branch or pull request was created" } elseif ($repoPublishResult -and $repoPublishResult.HasChanges) { "Direct commit to '$($repoPublishResult.BranchName)'" } else { 'No repository changes were needed' })
+        'Promotion mode'          = $deploymentPromotionMode
+        'Credential storage'      = $(if ($useGitHubEnvironments) { 'GitHub environments' } else { 'Prefixed repository variables/secrets' })
+        'Configured environments' = [string]($deploymentEnvironments.Count + $(if ($devEnvironmentConfiguration) { 1 } else { 0 }))
+    }) `
+    -NextStepLinks @(
+        $(if ($repoPublishResult -and $repoPublishResult.Mode -eq 'PullRequest' -and -not [string]::IsNullOrWhiteSpace($repoPublishResult.PullRequestUrl)) {
+            @{ Label = 'Review and merge the setup pull request (required before workflows are active)'; Url = $repoPublishResult.PullRequestUrl }
+        }),
+        @{ Label = 'Run EXPORT for your DEV environment'; Url = (Get-Alm4DataverseDocUrl -RelativePath 'docs/usage/exporting-changes.md' -Ref $ALM4DataverseRef) },
+        @{ Label = 'Configure EV and CR values for environments'; Url = (Get-Alm4DataverseDocUrl -RelativePath 'docs/setup/github-variables.md' -Ref $ALM4DataverseRef) },
+        @{ Label = 'Run DEPLOY to promote the build'; Url = (Get-Alm4DataverseDocUrl -RelativePath 'docs/usage/deploying.md' -Ref $ALM4DataverseRef) }
+    )

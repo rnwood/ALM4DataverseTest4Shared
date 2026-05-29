@@ -840,10 +840,28 @@ function Get-SetupPromptGuidance {
         },
         [pscustomobject]@{
             Kinds         = @('Menu')
-            PromptPattern = "^Fork '.+' has diverged from upstream\. Choose how to update it\.$"
+            PromptPattern = "^(Fork|Shared workflow repository) '.+' has diverged from upstream\. Choose how to update it\.$"
             Lines         = @(
-                'The selected fork no longer matches the upstream shared-workflow repo cleanly, so choose how setup should reconcile it.',
-                'Rebase preserves your commits where possible; reset force-aligns the fork to upstream and discards divergent history.'
+                'The selected shared workflow repository no longer matches the upstream ALM4Dataverse source cleanly, so choose how setup should reconcile it.',
+                'Rebase preserves your commits where possible; reset force-aligns the repository to upstream and discards divergent history.'
+            )
+            DocRelativePath = 'docs/setup/github-setup.md'
+        },
+        [pscustomobject]@{
+            Kinds         = @('Menu')
+            PromptPattern = "^How should '.+' be created\?$"
+            Lines         = @(
+                'Choose whether setup should create a public fork of the upstream shared-workflow repo or a brand-new private repository.',
+                'Public (fork) keeps the GitHub fork relationship; private creates an independent repo that setup can still sync from upstream.'
+            )
+            DocRelativePath = 'docs/setup/github-setup.md'
+        },
+        [pscustomobject]@{
+            Kinds         = @('Text')
+            PromptPattern = '^(Fork|Shared workflow) repository name$'
+            Lines         = @(
+                'Enter the GitHub repository name for the shared workflow repository setup should create or reuse.',
+                'A clear stable name helps when multiple application repos will reference the same shared workflow source.'
             )
             DocRelativePath = 'docs/setup/github-setup.md'
         },
@@ -855,15 +873,6 @@ function Get-SetupPromptGuidance {
                 'Rebase preserves your extra commits where possible; reset force-aligns the repo to upstream and discards divergent history.'
             )
             DocRelativePath = 'docs/setup/azdo-automated-setup.md'
-        },
-        [pscustomobject]@{
-            Kinds         = @('Text')
-            PromptPattern = '^Fork repository name$'
-            Lines         = @(
-                'Enter the GitHub repository name for the shared-workflow fork setup should create or reuse.',
-                'A clear stable name helps when multiple application repos will reference the same shared workflow source.'
-            )
-            DocRelativePath = 'docs/setup/github-setup.md'
         },
         [pscustomobject]@{
             Kinds         = @('Text')
@@ -1120,7 +1129,8 @@ function Show-SetupPromptGuidance {
     [CmdletBinding()]
     param(
         [Parameter(Mandatory)][ValidateSet('Menu', 'Text', 'YesNo', 'Secret')][string]$PromptKind,
-        [Parameter(Mandatory)][string]$PromptText
+        [Parameter(Mandatory)][string]$PromptText,
+        [Parameter()][switch]$OmitTrailingSpacer
     )
 
     $guidance = Get-SetupPromptGuidance -PromptKind $PromptKind -PromptText $PromptText
@@ -1136,7 +1146,8 @@ function Show-SetupPromptGuidance {
         -Ref $guidance.Ref `
         -LinkLabel $guidance.LinkLabel `
         -Header $guidanceHeader `
-        -SkipContextUpdate
+        -SkipContextUpdate `
+        -OmitTrailingSpacer:$OmitTrailingSpacer
 }
 
 function Get-SetupPromptInlineText {
@@ -1277,6 +1288,61 @@ function Clear-SetupStatusBarAtBottom {
     [void](Write-SetupConsoleBar -Text '' -TargetRow ([Math]::Max([Console]::WindowHeight - 1, 0)) -RestoreCursorPosition)
 }
 
+function Add-SetupConsoleCancelHandler {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory)][System.ConsoleCancelEventHandler]$Handler
+    )
+
+    try {
+        [System.Console]::add_CancelKeyPress($Handler)
+        return $true
+    }
+    catch {
+        try {
+            $cancelKeyPressEvent = [System.Console].GetEvent(
+                'CancelKeyPress',
+                [System.Reflection.BindingFlags]::Public -bor [System.Reflection.BindingFlags]::Static
+            )
+            if ($cancelKeyPressEvent) {
+                $cancelKeyPressEvent.AddEventHandler($null, $Handler)
+                return $true
+            }
+        }
+        catch {
+            # Some hosts do not expose a usable console cancel event. Continue without explicit Ctrl+C interception.
+        }
+    }
+
+    return $false
+}
+
+function Remove-SetupConsoleCancelHandler {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory)][System.ConsoleCancelEventHandler]$Handler
+    )
+
+    try {
+        [System.Console]::remove_CancelKeyPress($Handler)
+        return
+    }
+    catch {
+        try {
+            $cancelKeyPressEvent = [System.Console].GetEvent(
+                'CancelKeyPress',
+                [System.Reflection.BindingFlags]::Public -bor [System.Reflection.BindingFlags]::Static
+            )
+            if ($cancelKeyPressEvent) {
+                $cancelKeyPressEvent.RemoveEventHandler($null, $Handler)
+            }
+        }
+        catch {
+            # Ignore cleanup failures when the host does not support console cancel events.
+        }
+    }
+}
+
 function Show-SelectionPromptWithInterruptHandling {
     [CmdletBinding()]
     param(
@@ -1304,8 +1370,7 @@ function Show-SelectionPromptWithInterruptHandling {
 
     $handlerAttached = $false
     try {
-        [Console]::add_CancelKeyPress($cancelHandler)
-        $handlerAttached = $true
+        $handlerAttached = Add-SetupConsoleCancelHandler -Handler $cancelHandler
 
         return $Prompt.ShowAsync([Spectre.Console.AnsiConsole]::Console, $cancellationTokenSource.Token).GetAwaiter().GetResult()
     }
@@ -1319,7 +1384,7 @@ function Show-SelectionPromptWithInterruptHandling {
     finally {
         if ($handlerAttached) {
             try {
-                [Console]::remove_CancelKeyPress($cancelHandler)
+                Remove-SetupConsoleCancelHandler -Handler $cancelHandler
             }
             catch {
                 # Ignore cleanup failures.
@@ -1346,10 +1411,12 @@ function Write-SetupPromptFrame {
     if (-not $PreserveExistingContent -and -not [string]::IsNullOrWhiteSpace($currentSectionMessage)) {
         [Spectre.Console.AnsiConsole]::Clear()
         Write-SetupDashboard -Message $currentSectionMessage
+        [Spectre.Console.AnsiConsole]::WriteLine()
     }
 
     if (-not $SkipPromptGuidance) {
-        Show-SetupPromptGuidance -PromptKind $PromptKind -PromptText $PromptText
+        Show-SetupPromptGuidance -PromptKind $PromptKind -PromptText $PromptText -OmitTrailingSpacer
+        [Spectre.Console.AnsiConsole]::WriteLine()
     }
 }
 
@@ -1448,12 +1515,6 @@ function Select-FromMenu {
 
     Write-SetupPromptFrame -PromptKind 'Menu' -PromptText $Title -PreserveExistingContent:$PreserveExistingContent -SkipPromptGuidance:$SkipPromptGuidance
 
-    $prompt = [Spectre.Console.SelectionPrompt[string]]::new()
-    $prompt.Title = ''
-    $prompt.PageSize = [Math]::Min([Math]::Max($Items.Count, 1), [Console]::WindowHeight - ([Console]::CursorTop + 6))
-    $prompt.MoreChoicesText = ''
-    $prompt.WrapAround = $true
-
     $effectiveItems = @($Items)
     $wizardContext = Get-SetupWizardContext
     $hasGenericBack = $false
@@ -1461,11 +1522,30 @@ function Select-FromMenu {
         $wizardContext -and
         $wizardContext.CurrentStepIndex -gt 0 -and
         -not ($effectiveItems -contains 'Back') -and
-        -not ($effectiveItems -contains '← Back to previous step')
+        -not ($effectiveItems -contains '< Back to previous step')
     ) {
-        $effectiveItems += '← Back to previous step'
+        $effectiveItems += '< Back to previous step'
         $hasGenericBack = $true
     }
+
+    $prompt = [Spectre.Console.SelectionPrompt[string]]::new()
+    $prompt.MoreChoicesText = ''
+    $prompt.WrapAround = $true
+
+    $availableMenuRows = 10
+    try {
+        $windowTop = [Console]::WindowTop
+        $windowHeight = [Console]::WindowHeight
+        $cursorTop = [Console]::CursorTop
+        $visibleWindowBottom = $windowTop + [Math]::Max($windowHeight, 1)
+        $reservedRows = 4
+        $availableMenuRows = [Math]::Max($visibleWindowBottom - $cursorTop - $reservedRows, 1)
+    }
+    catch {
+        $availableMenuRows = 10
+    }
+
+    $prompt.PageSize = [Math]::Min([Math]::Max($effectiveItems.Count, 1), $availableMenuRows)
 
     if ($effectiveItems.Count -gt 8) {
         $prompt.SearchEnabled = $true
@@ -1480,7 +1560,8 @@ function Select-FromMenu {
 
     try {
         $selectedValue = Show-SelectionPromptWithInterruptHandling -Prompt $prompt
-        if ($hasGenericBack -and $selectedValue -eq '← Back to previous step') {
+        $isBackSelection = ($selectedValue -eq 'Back' -or $selectedValue -like '< Back*')
+        if ($isBackSelection -and ($effectiveItems -contains '< Back to previous step' -or $effectiveItems -contains 'Back')) {
             Request-SetupWizardBack
         }
 
@@ -1722,7 +1803,8 @@ function Write-SetupGuidance {
         [Parameter()][string]$Ref,
         [Parameter()][string]$LinkLabel = 'Full docs',
         [Parameter()][string]$Header = 'What this step covers',
-        [Parameter()][switch]$SkipContextUpdate
+        [Parameter()][switch]$SkipContextUpdate,
+        [Parameter()][switch]$OmitTrailingSpacer
     )
 
     Initialize-SpectreConsole
@@ -1766,7 +1848,9 @@ function Write-SetupGuidance {
         Write-SetupPanelBottomBorderOverlay -VisibleText $overlayVisibleText -MarkupText $overlayMarkup -PanelWriteStartTop $panelWriteStartTop
     }
 
-    [Spectre.Console.AnsiConsole]::WriteLine()
+    if (-not $OmitTrailingSpacer) {
+        [Spectre.Console.AnsiConsole]::WriteLine()
+    }
 }
 
 function Read-TextWithDefault {
@@ -2507,14 +2591,27 @@ function Invoke-WithSpectreStatus {
                 param($context)
 
                 $capturedOutput = @(& { & $ScriptBlock $context } 6>&1 5>&1 4>&1 3>&1 2>&1)
+                $capturedResult = $null
                 foreach ($entry in $capturedOutput) {
-                    $line = ConvertTo-SetupActivityOutputLine -Entry $entry
-                    if (-not [string]::IsNullOrWhiteSpace($line)) {
-                        $capturedLines.Add($line)
+                    if (
+                        $entry -is [System.Management.Automation.InformationRecord] -or
+                        $entry -is [System.Management.Automation.WarningRecord] -or
+                        $entry -is [System.Management.Automation.VerboseRecord] -or
+                        $entry -is [System.Management.Automation.DebugRecord] -or
+                        $entry -is [System.Management.Automation.ErrorRecord] -or
+                        $entry -is [string]
+                    ) {
+                        $line = ConvertTo-SetupActivityOutputLine -Entry $entry
+                        if (-not [string]::IsNullOrWhiteSpace($line)) {
+                            $capturedLines.Add($line)
+                        }
+                    }
+                    else {
+                        $capturedResult = $entry
                     }
                 }
 
-                return $null
+                return $capturedResult
             }
         )
 
@@ -2587,7 +2684,7 @@ function Invoke-WithErrorHandling {
             }
             $options += 'Abort Setup'
 
-            $choice = Select-FromMenu -Title "How would you like to proceed?" -Items $options
+            $choice = Select-FromMenu -Title "How would you like to proceed?" -Items $options -PreserveExistingContent
 
             if ($null -eq $choice) {
                 Write-Host "Setup aborted by user." -ForegroundColor Yellow
@@ -2596,6 +2693,8 @@ function Invoke-WithErrorHandling {
 
             switch ($options[$choice]) {
                 'Retry' {
+                    Initialize-SpectreConsole
+                    [Spectre.Console.AnsiConsole]::Clear()
                     Write-Host "Retrying $OperationName..." -ForegroundColor Cyan
                     continue
                 }
@@ -2620,7 +2719,7 @@ function Show-SetupCompletionScreen {
         [Parameter(Mandatory)][string]$AccessUrl,
         [Parameter()][array]$MetricCards,
         [Parameter()][hashtable]$SummaryValues,
-        [Parameter()][string[]]$NextStepLinks,
+        [Parameter()][array]$NextStepLinks,
         [Parameter()][string[]]$Notes
     )
 
@@ -2628,6 +2727,11 @@ function Show-SetupCompletionScreen {
     [Spectre.Console.AnsiConsole]::Clear()
 
     Write-SetupDashboard -Message $Heading -IncludeTrailingSpacer
+
+    if ($SummaryValues -and $SummaryValues.Count -gt 0) {
+        [Spectre.Console.AnsiConsole]::Write((New-SpectrePanel -Content (New-SpectreInfoGrid -Values $SummaryValues -LabelWidth 18) -Header 'Result summary' -BorderColor 'deepskyblue1' -Expand))
+        [Spectre.Console.AnsiConsole]::WriteLine()
+    }
 
     $heroLines = @(
         '[grey]The guided setup has finished and the generated automation assets are ready for review.[/]',
@@ -2637,34 +2741,60 @@ function Show-SetupCompletionScreen {
     [Spectre.Console.AnsiConsole]::Write((New-SpectrePanel -Content ([Spectre.Console.Markup]::new(($heroLines -join [Environment]::NewLine))) -Header 'Ready to open' -BorderColor 'green3_1' -Expand -PaddingY 1))
     [Spectre.Console.AnsiConsole]::WriteLine()
 
-    if ($MetricCards -and @($MetricCards).Count -gt 0) {
-        Show-SpectreMetricCards -Cards $MetricCards
-    }
-
-    if ($SummaryValues -and $SummaryValues.Count -gt 0) {
-        [Spectre.Console.AnsiConsole]::Write((New-SpectrePanel -Content (New-SpectreInfoGrid -Values $SummaryValues -LabelWidth 18) -Header 'Result summary' -BorderColor 'deepskyblue1' -Expand))
-        [Spectre.Console.AnsiConsole]::WriteLine()
-    }
-
     if ($NextStepLinks -and $NextStepLinks.Count -gt 0) {
         $linkMarkup = @(
-            foreach ($link in $NextStepLinks) {
-                "• [link=$link]$link[/]"
+            foreach ($nextStep in $NextStepLinks) {
+                $nextStepUrl = $null
+                $nextStepLabel = $null
+
+                if ($nextStep -is [string]) {
+                    $nextStepUrl = $nextStep
+                    $nextStepLabel = $nextStep
+                }
+                elseif ($nextStep -is [System.Collections.IDictionary]) {
+                    if ($nextStep.Contains('Url')) {
+                        $nextStepUrl = [string]$nextStep['Url']
+                    }
+
+                    if ($nextStep.Contains('Label') -and -not [string]::IsNullOrWhiteSpace($nextStep['Label'])) {
+                        $nextStepLabel = [string]$nextStep['Label']
+                    }
+                    elseif ($nextStep.Contains('Description') -and -not [string]::IsNullOrWhiteSpace($nextStep['Description'])) {
+                        $nextStepLabel = [string]$nextStep['Description']
+                    }
+                    elseif ($nextStep.Contains('Text') -and -not [string]::IsNullOrWhiteSpace($nextStep['Text'])) {
+                        $nextStepLabel = [string]$nextStep['Text']
+                    }
+                }
+                elseif ($nextStep -is [pscustomobject]) {
+                    if ($nextStep.PSObject.Properties.Name -contains 'Url') {
+                        $nextStepUrl = [string]$nextStep.Url
+                    }
+
+                    if ($nextStep.PSObject.Properties.Name -contains 'Label' -and -not [string]::IsNullOrWhiteSpace($nextStep.Label)) {
+                        $nextStepLabel = [string]$nextStep.Label
+                    }
+                    elseif ($nextStep.PSObject.Properties.Name -contains 'Description' -and -not [string]::IsNullOrWhiteSpace($nextStep.Description)) {
+                        $nextStepLabel = [string]$nextStep.Description
+                    }
+                    elseif ($nextStep.PSObject.Properties.Name -contains 'Text' -and -not [string]::IsNullOrWhiteSpace($nextStep.Text)) {
+                        $nextStepLabel = [string]$nextStep.Text
+                    }
+                }
+
+                if ([string]::IsNullOrWhiteSpace($nextStepUrl)) {
+                    continue
+                }
+
+                if ([string]::IsNullOrWhiteSpace($nextStepLabel)) {
+                    $nextStepLabel = $nextStepUrl
+                }
+
+                "• [link=$nextStepUrl]$(ConvertTo-SpectreMarkupLiteral -Text $nextStepLabel)[/]"
             }
         ) -join [Environment]::NewLine
 
         [Spectre.Console.AnsiConsole]::Write((New-SpectrePanel -Content ([Spectre.Console.Markup]::new($linkMarkup)) -Header 'Next steps' -BorderColor 'yellow3' -Expand))
-        [Spectre.Console.AnsiConsole]::WriteLine()
-    }
-
-    if ($Notes -and $Notes.Count -gt 0) {
-        $noteMarkup = @(
-            foreach ($note in $Notes) {
-                "• $(ConvertTo-SpectreMarkupLiteral -Text $note)"
-            }
-        ) -join [Environment]::NewLine
-
-        [Spectre.Console.AnsiConsole]::Write((New-SpectrePanel -Content ([Spectre.Console.Markup]::new($noteMarkup)) -Header 'Notes' -BorderColor 'grey42' -Expand))
         [Spectre.Console.AnsiConsole]::WriteLine()
     }
 }
