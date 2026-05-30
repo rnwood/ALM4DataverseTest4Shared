@@ -609,491 +609,13 @@ function Confirm-SetupReviewAction {
     }
 }
 
-function Get-SetupPromptGuidance {
+function Get-DefaultSetupPromptGuidance {
     [CmdletBinding()]
     param(
-        [Parameter(Mandatory)][ValidateSet('Menu', 'Text', 'YesNo', 'Secret')][string]$PromptKind,
-        [Parameter(Mandatory)][string]$PromptText
+        [Parameter(Mandatory)][ValidateSet('Menu', 'Text', 'YesNo', 'Secret')][string]$PromptKind
     )
 
-    $currentSectionMessage = Get-SetupCurrentSectionMessage
-    $docContext = Get-SetupPromptDocContext
-
-    $guidanceRules = @(
-        [pscustomobject]@{
-            Kinds          = @('Menu')
-            PromptPattern  = '^GitHub authentication$'
-            SectionPattern = '^Authenticating with GitHub$'
-            Lines          = @(
-                'Choose which GitHub account setup should use for repository access, workflow creation, and environment management.',
-                'If you switch accounts, setup will sign out of the current GitHub CLI session and open a browser so you can sign in again.'
-            )
-            DocRelativePath = 'docs/setup/github-setup.md'
-        },
-        [pscustomobject]@{
-            Kinds          = @('Menu')
-            PromptPattern  = '^Azure authentication$'
-            SectionPattern = '^Authenticating with Azure$'
-            Lines          = @(
-                'Choose which Azure sign-in setup should use for Entra ID app registrations and Dataverse access during GitHub setup.',
-                'Use an account that can reach the tenant and the DEV environment you plan to configure.'
-            )
-            DocRelativePath = 'docs/setup/github-setup.md'
-        },
-        [pscustomobject]@{
-            Kinds          = @('Menu')
-            PromptPattern  = '^Azure authentication$'
-            SectionPattern = '^Authenticating$'
-            Lines          = @(
-                'Choose which Azure sign-in setup should use for Azure DevOps access, service connections, and Dataverse configuration.',
-                'Use an account that can access the target organization or project and the DEV environment you plan to configure.'
-            )
-            DocRelativePath = 'docs/setup/azdo-automated-setup.md'
-        },
-        [pscustomobject]@{
-            Kinds         = @('Menu')
-            PromptPattern = '^Open the browser for Azure authentication when you are ready\.$'
-            Lines         = @(
-                'Continue when you are ready for setup to open the browser and complete the Azure sign-in flow.',
-                'This is used to obtain the tokens needed for the remaining automated setup steps.'
-            )
-        },
-        [pscustomobject]@{
-            Kinds         = @('Menu')
-            PromptPattern = '^Select the repository to set up ALM4Dataverse in$'
-            Lines         = @(
-                'Choose the main repository where ALM4Dataverse should add workflow files and repository configuration.',
-                'This is the repo your solutions and other assets will live in.'
-            )
-            DocRelativePath = 'docs/setup/github-setup.md'
-        },
-        [pscustomobject]@{
-            Kinds         = @('Menu')
-            PromptPattern = '^Select shared workflow repository$'
-            Lines         = @(
-                'Select the repo where you want to store the reusable ALM4Dataverse workflows.',
-                'It should be a different repo from your main application repo so multiple repos can reference the same shared workflow source.'
-            )
-            DocRelativePath = 'docs/setup/github-setup.md'
-        },
-        [pscustomobject]@{
-            Kinds         = @('Menu')
-            PromptPattern = '^Select repository visibility$'
-            Lines         = @(
-                'Choose whether the new repository should be public or private.',
-                'Private is the safer default when the repo will hold organization-specific configuration or automation.'
-            )
-            DocRelativePath = 'docs/setup/github-setup.md'
-        },
-        [pscustomobject]@{
-            Kinds         = @('Menu')
-            PromptPattern = "^Select App Registration credentials for '.+'$"
-            Lines         = @(
-                'Choose the App Registration that workflows should use to authenticate to Dataverse for this environment.',
-                'You can reuse an existing registration or create a new one if you want tighter isolation per environment.'
-            )
-        },
-        [pscustomobject]@{
-            Kinds         = @('Menu')
-            PromptPattern = "^How should setup handle the existing client secret for '.+'\?$"
-            Lines         = @(
-                'Decide whether setup should keep using the existing client secret or replace it.',
-                'Keeping it avoids touching downstream consumers; replacing it is useful if you want to rotate credentials now.'
-            )
-        },
-        [pscustomobject]@{
-            Kinds         = @('Menu')
-            PromptPattern = '^Select authentication type for the new App Registration$'
-            Lines         = @(
-                'Choose how the new App Registration should authenticate.',
-                'Workload identity federation avoids storing a secret; client-secret mode works on older patterns but requires secret management.'
-            )
-            DocRelativePath = 'docs/setup/github-setup.md'
-        },
-        [pscustomobject]@{
-            Kinds         = @('Menu')
-            PromptPattern = '^Select authentication type for the new service connection$'
-            Lines         = @(
-                'Choose how the Azure DevOps service connection should authenticate.',
-                'Workload identity federation is the modern option; secret-based auth is the fallback when federation is not available.'
-            )
-            DocRelativePath = 'docs/config/azdo-environment-service-connection.md'
-        },
-        [pscustomobject]@{
-            Kinds         = @('Menu')
-            PromptPattern = '^Select authentication type$'
-            Lines         = @(
-                'Choose whether the credentials should use workload identity federation or a client secret.',
-                'This affects which values setup asks for and how the automation will be authorized later.'
-            )
-        },
-        [pscustomobject]@{
-            Kinds         = @('Menu')
-            PromptPattern = "^Select Dataverse Service Account for '.+'$"
-            Lines         = @(
-                'Choose which Dataverse user account should own automated changes in this environment.',
-                'Use a dedicated service account where possible so imports, deployment actions, and ownership are easy to audit.'
-            )
-        },
-        [pscustomobject]@{
-            Kinds         = @('Menu')
-            PromptPattern = '^Select an Azure DevOps organization$'
-            Lines         = @(
-                'Choose the Azure DevOps organization that will host the project, repositories, pipelines, and approvals for this setup.',
-                'Make sure you pick the long-lived organization your team already uses for ALM assets.'
-            )
-            DocRelativePath = 'docs/setup/azdo-automated-setup.md'
-        },
-        [pscustomobject]@{
-            Kinds         = @('Menu')
-            PromptPattern = '^Select the target Azure DevOps project$'
-            Lines         = @(
-                'Choose the Azure DevOps project that should contain the ALM repositories, pipelines, service connections, and approvals.',
-                'Use a stable project name instead of one tied to a temporary phase or release.'
-            )
-            DocRelativePath = 'docs/setup/azdo-automated-setup.md'
-        },
-        [pscustomobject]@{
-            Kinds         = @('Menu')
-            PromptPattern = '^Select a process \(template\) for the new project$'
-            Lines         = @(
-                'Choose the Azure DevOps work-item process template for the new project.',
-                'This affects boards and work tracking, not the ALM4Dataverse pipeline behavior itself.'
-            )
-            DocRelativePath = 'docs/setup/azdo-automated-setup.md'
-        },
-        [pscustomobject]@{
-            Kinds          = @('Menu')
-            PromptPattern  = '^Select the repo$'
-            SectionPattern = '^Selecting main Git repository$'
-            Lines          = @(
-                'Choose the main application repository where ALM4Dataverse should add pipeline YAML and configuration files.',
-                'Do not pick the shared template repo here; this should be the repo that contains your solution source.'
-            )
-            DocRelativePath = 'docs/setup/azdo-automated-setup.md'
-        },
-        [pscustomobject]@{
-            Kinds         = @('Menu')
-            PromptPattern = '^Select the shared repository that will host the ALM4Dataverse templates$'
-            Lines         = @(
-                'Select the repo where you want to store the reusable ALM4Dataverse templates and shared pipeline assets.',
-                'It should be a different repo from your main application repo so multiple repos can consume the same shared source.'
-            )
-            DocRelativePath = 'docs/setup/azdo-automated-setup.md'
-        },
-        [pscustomobject]@{
-            Kinds         = @('Menu')
-            PromptPattern = "^Select Service Principal credentials for '.+'$"
-            Lines         = @(
-                'Choose the service principal or service connection that Azure DevOps should use for this environment.',
-                'You can reuse credentials when appropriate, or create a dedicated identity for stronger isolation.'
-            )
-            DocRelativePath = 'docs/config/azdo-environment-service-connection.md'
-        },
-        [pscustomobject]@{
-            Kinds         = @('Menu')
-            PromptPattern = '^Manage solutions$'
-            Lines         = @(
-                'Use this menu to build the ordered list of unmanaged Dataverse solutions that should be kept in source control.',
-                'The order matters because setup writes it into `alm-config.psd1` and later automation uses that sequence.'
-            )
-            DocRelativePath = 'docs/config/alm-config.md'
-        },
-        [pscustomobject]@{
-            Kinds         = @('Menu')
-            PromptPattern = '^Select a solution to add$'
-            Lines         = @(
-                'Choose the next unmanaged solution to add to the source-controlled list.',
-                'Start with the lowest-level dependencies so the final order matches how solutions should be processed.'
-            )
-            DocRelativePath = 'docs/config/alm-config.md'
-        },
-        [pscustomobject]@{
-            Kinds         = @('Menu')
-            PromptPattern = '^Manage deployment environments$'
-            Lines         = @(
-                'Use this menu to add, edit, or remove the Dataverse environments that form your deployment path.',
-                'Keep the short names stable and the list in promotion order, because that order becomes the generated stage chain.'
-            )
-        },
-        [pscustomobject]@{
-            Kinds         = @('Menu')
-            PromptPattern = '^Select the environment to edit$'
-            Lines         = @(
-                'Choose which configured environment entry you want to update.',
-                'Editing lets you correct the target Dataverse URL, short name, credentials, or service account before setup applies changes.'
-            )
-        },
-        [pscustomobject]@{
-            Kinds         = @('Menu')
-            PromptPattern = '^Select the environment to remove$'
-            Lines         = @(
-                'Choose which configured environment entry should be removed from the deployment plan.',
-                'Removing it here prevents setup from generating or updating that stage during this run.'
-            )
-        },
-        [pscustomobject]@{
-            Kinds         = @('Menu')
-            PromptPattern = "^Select (your DEV environment|your DEV Dataverse environment|a Dataverse environment for deployment|the Dataverse environment for '.+'|a deployment environment|the deployment environment for '.+'|a Dataverse environment|Resolve the Dataverse environment for existing deployment stage '.+')$"
-            Lines         = @(
-                'Choose the actual Dataverse environment that should back this stage or configuration slot.',
-                'Check the friendly name and URL carefully so setup does not point DEV or deployment automation at the wrong environment.'
-            )
-        },
-        [pscustomobject]@{
-            Kinds         = @('Menu')
-            PromptPattern = '^Review complete\. Apply the configuration or cancel setup\.$'
-            Lines         = @(
-                'Review this final choice before setup writes files, updates repositories, or provisions credentials and connections.',
-                'Choose Apply changes to continue, or cancel if you want to go back and adjust the plan first.'
-            )
-        },
-        [pscustomobject]@{
-            Kinds         = @('Menu')
-            PromptPattern = '^How would you like to proceed\?$'
-            Lines         = @(
-                'The previous action failed, so decide whether setup should retry, skip the step, or stop completely.',
-                'Skipping is handy for exploration, but it can leave the generated configuration incomplete.'
-            )
-        },
-        [pscustomobject]@{
-            Kinds         = @('Menu')
-            PromptPattern = '^How should the .+ repository changes be published\?$'
-            Lines         = @(
-                'Choose whether setup should commit changes directly or push them to a branch for review in a pull request.',
-                'Direct commit is fastest; pull request mode is safer when branch protection or review gates are in play.'
-            )
-        },
-        [pscustomobject]@{
-            Kinds         = @('Menu')
-            PromptPattern = "^(Fork|Shared workflow repository) '.+' has diverged from upstream\. Choose how to update it\.$"
-            Lines         = @(
-                'The selected shared workflow repository no longer matches the upstream ALM4Dataverse source cleanly, so choose how setup should reconcile it.',
-                'Rebase preserves your commits where possible; reset force-aligns the repository to upstream and discards divergent history.'
-            )
-            DocRelativePath = 'docs/setup/github-setup.md'
-        },
-        [pscustomobject]@{
-            Kinds         = @('Menu')
-            PromptPattern = "^How should '.+' be created\?$"
-            Lines         = @(
-                'Choose whether setup should create a public fork of the upstream shared-workflow repo or a brand-new private repository.',
-                'Public (fork) keeps the GitHub fork relationship; private creates an independent repo that setup can still sync from upstream.'
-            )
-            DocRelativePath = 'docs/setup/github-setup.md'
-        },
-        [pscustomobject]@{
-            Kinds         = @('Text')
-            PromptPattern = '^(Fork|Shared workflow) repository name$'
-            Lines         = @(
-                'Enter the GitHub repository name for the shared workflow repository setup should create or reuse.',
-                'A clear stable name helps when multiple application repos will reference the same shared workflow source.'
-            )
-            DocRelativePath = 'docs/setup/github-setup.md'
-        },
-        [pscustomobject]@{
-            Kinds         = @('Menu')
-            PromptPattern = "^The shared repo '.+' has diverged\. Choose how to update it\.$"
-            Lines         = @(
-                'The selected shared repository no longer matches the upstream ALM4Dataverse source cleanly, so choose how setup should reconcile it.',
-                'Rebase preserves your extra commits where possible; reset force-aligns the repo to upstream and discards divergent history.'
-            )
-            DocRelativePath = 'docs/setup/azdo-automated-setup.md'
-        },
-        [pscustomobject]@{
-            Kinds         = @('Text')
-            PromptPattern = '^Repository owner \(user or organization\)$'
-            Lines         = @(
-                'Enter the GitHub user or organization that should own the new repository.',
-                'Use the team-owned organization when the repo should outlive a single developer account.'
-            )
-            DocRelativePath = 'docs/setup/github-setup.md'
-        },
-        [pscustomobject]@{
-            Kinds         = @('Text')
-            PromptPattern = '^New repository name$'
-            Lines         = @(
-                'Enter the name for the new repository that will receive the generated ALM4Dataverse files.',
-                'Pick a durable name that matches the application or solution set you are automating.'
-            )
-            DocRelativePath = 'docs/setup/github-setup.md'
-        },
-        [pscustomobject]@{
-            Kinds         = @('Text')
-            PromptPattern = '^Friendly name \(for reuse reference\)$'
-            Lines         = @(
-                'Enter a friendly label that makes this credential easy to recognise if you want to reuse it later in setup.',
-                'This is just a setup-time reference label, so choose something descriptive rather than secret.'
-            )
-        },
-        [pscustomobject]@{
-            Kinds         = @('Text')
-            PromptPattern = '^Credential name \(for reuse reference\)$'
-            Lines         = @(
-                'Enter a friendly label that makes this credential easy to recognise if you want to reuse it later in setup.',
-                'This label is for setup convenience and should describe the identity and environment clearly.'
-            )
-        },
-        [pscustomobject]@{
-            Kinds         = @('Text')
-            PromptPattern = '^Application ID \(Client ID\)$'
-            Lines         = @(
-                'Enter the Application (client) ID of the Entra ID App Registration that should be used for this environment.',
-                'Copy the value from App registrations > Overview so setup can bind the automation to the correct identity.'
-            )
-        },
-        [pscustomobject]@{
-            Kinds         = @('Text')
-            PromptPattern = '^Application object ID \(from App registrations > Overview, not the enterprise app object ID\)$'
-            Lines         = @(
-                'Enter the App Registration object ID from the Entra ID App registrations blade, not the Enterprise applications object ID.',
-                'Setup needs this specific object ID when it creates or updates workload identity configuration.'
-            )
-        },
-        [pscustomobject]@{
-            Kinds         = @('Text')
-            PromptPattern = '^Service Account UPN \(for example: serviceaccount@contoso\.com\)$'
-            Lines         = @(
-                'Enter the UPN of the Dataverse user account that should own automated changes in this environment.',
-                'Use a dedicated service account where practical so ownership and audit trails stay clear.'
-            )
-        },
-        [pscustomobject]@{
-            Kinds         = @('Text')
-            PromptPattern = '^Enter a short name for this environment$'
-            Lines         = @(
-                'Enter the stable short name that should identify this environment in pipeline and workflow stage names.',
-                'Use concise names such as TEST, UAT, or PROD and keep them stable over time.'
-            )
-        },
-        [pscustomobject]@{
-            Kinds         = @('Text')
-            PromptPattern = '^Branch to commit to$'
-            Lines         = @(
-                'Enter the branch that should receive the generated setup changes directly.',
-                'Use the protected or default branch only if your governance rules allow direct commits from automation setup.'
-            )
-        },
-        [pscustomobject]@{
-            Kinds         = @('Text')
-            PromptPattern = '^Branch to push for the pull request$'
-            Lines         = @(
-                'Enter the working branch name setup should push before opening a pull request.',
-                'A clear branch name makes the purpose of the generated change set obvious to reviewers.'
-            )
-        },
-        [pscustomobject]@{
-            Kinds         = @('Text')
-            PromptPattern = '^Pull request title$'
-            Lines         = @(
-                'Enter the title that reviewers will see on the generated pull request.',
-                'Keep it short but descriptive so the automation-related change is easy to spot in repo history.'
-            )
-        },
-        [pscustomobject]@{
-            Kinds         = @('Text')
-            PromptPattern = '^Enter the name for the new Azure DevOps project$'
-            Lines         = @(
-                'Enter the name of the Azure DevOps project that should host your repositories, pipelines, and approvals.',
-                'Choose a long-lived project name rather than something tied to a one-off migration or release.'
-            )
-            DocRelativePath = 'docs/setup/azdo-automated-setup.md'
-        },
-        [pscustomobject]@{
-            Kinds         = @('Text')
-            PromptPattern = '^Enter the name for the new main repository$'
-            Lines         = @(
-                'Enter the name of the main application repository that will receive the generated ALM4Dataverse pipeline files.',
-                'This repo should represent your app or solution source, not the shared template repo.'
-            )
-            DocRelativePath = 'docs/setup/azdo-automated-setup.md'
-        },
-        [pscustomobject]@{
-            Kinds         = @('Text')
-            PromptPattern = '^Enter the name for the shared repository$'
-            Lines         = @(
-                'Enter the name of the shared repository that will hold reusable ALM4Dataverse templates and shared pipeline assets.',
-                'Keep it separate from the main app repo so you can reference the same shared assets from multiple repositories.'
-            )
-            DocRelativePath = 'docs/setup/azdo-automated-setup.md'
-        },
-        [pscustomobject]@{
-            Kinds         = @('YesNo')
-            PromptPattern = '^Use ALM4Dataverse AzDO extension\? \(required for Workload Identity Federation\)$'
-            Lines         = @(
-                'Decide whether setup should generate pipelines that depend on the ALM4Dataverse Azure DevOps extension.',
-                'Enable it if you want workload identity federation and the richer ALM4Dataverse task set; disable it only for the secret-based fallback path.'
-            )
-            DocRelativePath = 'docs/config/azdo-environment-service-connection.md'
-        },
-        [pscustomobject]@{
-            Kinds         = @('YesNo')
-            PromptPattern = "^Extension '.+' not found\. Install it\?$"
-            Lines         = @(
-                'Confirm whether setup should install the missing Azure DevOps extension automatically.',
-                'This usually requires organization-level permission, but it saves you from installing the dependency manually first.'
-            )
-            DocRelativePath = 'docs/setup/azdo-automated-setup.md'
-        },
-        [pscustomobject]@{
-            Kinds         = @('YesNo')
-            PromptPattern = "^Updates are available from upstream \(fast-forward\)\. Update '.+'\?$"
-            Lines         = @(
-                'Confirm whether setup should fast-forward the selected shared-workflow fork to match upstream.',
-                'Choose Yes when you want the reusable workflow repo aligned before generating references to it.'
-            )
-            DocRelativePath = 'docs/setup/github-setup.md'
-        },
-        [pscustomobject]@{
-            Kinds         = @('YesNo')
-            PromptPattern = "^Updates are available from the shared repo \(fast-forward\)\. Update '.+'\?$"
-            Lines         = @(
-                'Confirm whether setup should fast-forward the selected shared repository so it matches the upstream ALM4Dataverse source.',
-                'Choose Yes when you want the shared pipeline assets aligned before your main repo references them.'
-            )
-            DocRelativePath = 'docs/setup/azdo-automated-setup.md'
-        },
-        [pscustomobject]@{
-            Kinds         = @('YesNo')
-            PromptPattern = '^Are you sure this is the Secret Value\?$'
-            Lines         = @(
-                'Confirm that you pasted the secret value itself rather than the secret ID, name, or description.',
-                'This matters because the secret is hidden as you type and setup cannot tell whether you pasted the wrong field.'
-            )
-        },
-        [pscustomobject]@{
-            Kinds         = @('Secret')
-            PromptPattern = '^Client Secret$'
-            Lines         = @(
-                'Paste the client secret value exactly as issued by Entra ID or your identity platform.',
-                'This prompt hides what you type, so double-check you copied the secret value and not the secret identifier.'
-            )
-        }
-    )
-
-    $matchedRule = $null
-    foreach ($rule in $guidanceRules) {
-        if ($rule.Kinds -notcontains $PromptKind) {
-            continue
-        }
-
-        if ($PromptText -notmatch $rule.PromptPattern) {
-            continue
-        }
-
-        if (
-            $rule.PSObject.Properties.Name -contains 'SectionPattern' -and
-            -not [string]::IsNullOrWhiteSpace($rule.SectionPattern) -and
-            ($currentSectionMessage -notmatch $rule.SectionPattern)
-        ) {
-            continue
-        }
-
-        $matchedRule = $rule
-        break
-    }
-
-    $fallbackLines = switch ($PromptKind) {
+    return @(switch ($PromptKind) {
         'Menu' {
             @(
                 'Choose the option that best matches what you want setup to do next.',
@@ -1118,37 +640,7 @@ function Get-SetupPromptGuidance {
                 'The input is hidden while you type, so paste carefully and verify you copied the right field from the source system.'
             )
         }
-    }
-
-    $effectiveDocRelativePath = $null
-    $effectiveRef = $null
-    $effectiveLinkLabel = 'Click for docs'
-
-    if ($matchedRule -and $matchedRule.PSObject.Properties.Name -contains 'DocRelativePath' -and -not [string]::IsNullOrWhiteSpace($matchedRule.DocRelativePath)) {
-        $effectiveDocRelativePath = $matchedRule.DocRelativePath
-    }
-    elseif ($docContext -and -not [string]::IsNullOrWhiteSpace($docContext.DocRelativePath)) {
-        $effectiveDocRelativePath = $docContext.DocRelativePath
-        $effectiveRef = $docContext.Ref
-        if (-not [string]::IsNullOrWhiteSpace($docContext.LinkLabel)) {
-            $effectiveLinkLabel = $docContext.LinkLabel
-        }
-    }
-
-    if ($matchedRule -and $matchedRule.PSObject.Properties.Name -contains 'Ref' -and -not [string]::IsNullOrWhiteSpace($matchedRule.Ref)) {
-        $effectiveRef = $matchedRule.Ref
-    }
-
-    if ($matchedRule -and $matchedRule.PSObject.Properties.Name -contains 'LinkLabel' -and -not [string]::IsNullOrWhiteSpace($matchedRule.LinkLabel)) {
-        $effectiveLinkLabel = $matchedRule.LinkLabel
-    }
-
-    return [pscustomobject]@{
-        Lines           = $(if ($matchedRule) { @($matchedRule.Lines) } else { $fallbackLines })
-        DocRelativePath = $effectiveDocRelativePath
-        Ref             = $effectiveRef
-        LinkLabel       = $effectiveLinkLabel
-    }
+    })
 }
 
 function Show-SetupPromptGuidance {
@@ -1156,21 +648,32 @@ function Show-SetupPromptGuidance {
     param(
         [Parameter(Mandatory)][ValidateSet('Menu', 'Text', 'YesNo', 'Secret')][string]$PromptKind,
         [Parameter(Mandatory)][string]$PromptText,
+        [Parameter()][string[]]$GuidanceLines,
+        [Parameter()][string]$DocRelativePath,
+        [Parameter()][string]$Ref,
+        [Parameter()][string]$LinkLabel = 'Click for docs',
         [Parameter()][switch]$OmitTrailingSpacer
     )
 
-    $guidance = Get-SetupPromptGuidance -PromptKind $PromptKind -PromptText $PromptText
-    if (-not $guidance) {
+    $effectiveGuidanceLines = @($GuidanceLines)
+    if ($effectiveGuidanceLines.Count -eq 0) {
+        $effectiveGuidanceLines = Get-DefaultSetupPromptGuidance -PromptKind $PromptKind
+    }
+
+    if (
+        $effectiveGuidanceLines.Count -eq 0 -and
+        [string]::IsNullOrWhiteSpace($DocRelativePath)
+    ) {
         return
     }
 
     $guidanceHeader = if ([string]::IsNullOrWhiteSpace($PromptText)) { 'Prompt guidance' } else { $PromptText }
 
     Write-SetupGuidance `
-        -Lines $guidance.Lines `
-        -DocRelativePath $guidance.DocRelativePath `
-        -Ref $guidance.Ref `
-        -LinkLabel $guidance.LinkLabel `
+        -Lines $effectiveGuidanceLines `
+        -DocRelativePath $DocRelativePath `
+        -Ref $Ref `
+        -LinkLabel $LinkLabel `
         -Header $guidanceHeader `
         -SkipContextUpdate `
         -OmitTrailingSpacer:$OmitTrailingSpacer
@@ -1427,6 +930,10 @@ function Write-SetupPromptFrame {
     param(
         [Parameter(Mandatory)][ValidateSet('Menu', 'Text', 'YesNo', 'Secret')][string]$PromptKind,
         [Parameter(Mandatory)][string]$PromptText,
+        [Parameter()][string[]]$PromptGuidanceLines,
+        [Parameter()][string]$PromptGuidanceDocRelativePath,
+        [Parameter()][string]$PromptGuidanceRef,
+        [Parameter()][string]$PromptGuidanceLinkLabel = 'Click for docs',
         [Parameter()][switch]$PreserveExistingContent,
         [Parameter()][switch]$SkipPromptGuidance
     )
@@ -1441,7 +948,14 @@ function Write-SetupPromptFrame {
     }
 
     if (-not $SkipPromptGuidance) {
-        Show-SetupPromptGuidance -PromptKind $PromptKind -PromptText $PromptText -OmitTrailingSpacer
+        Show-SetupPromptGuidance `
+            -PromptKind $PromptKind `
+            -PromptText $PromptText `
+            -GuidanceLines $PromptGuidanceLines `
+            -DocRelativePath $PromptGuidanceDocRelativePath `
+            -Ref $PromptGuidanceRef `
+            -LinkLabel $PromptGuidanceLinkLabel `
+            -OmitTrailingSpacer
         [Spectre.Console.AnsiConsole]::WriteLine()
     }
 }
@@ -1463,13 +977,17 @@ function Read-SecretText {
     [CmdletBinding()]
     param(
         [Parameter(Mandatory)][string]$Prompt,
+        [Parameter()][string[]]$PromptGuidanceLines,
+        [Parameter()][string]$PromptGuidanceDocRelativePath,
+        [Parameter()][string]$PromptGuidanceRef,
+        [Parameter()][string]$PromptGuidanceLinkLabel = 'Click for docs',
         [Parameter()][switch]$AllowEmpty
     )
 
     Initialize-SpectreConsole
 
     while ($true) {
-        Write-SetupPromptFrame -PromptKind 'Secret' -PromptText $Prompt
+        Write-SetupPromptFrame -PromptKind 'Secret' -PromptText $Prompt -PromptGuidanceLines $PromptGuidanceLines -PromptGuidanceDocRelativePath $PromptGuidanceDocRelativePath -PromptGuidanceRef $PromptGuidanceRef -PromptGuidanceLinkLabel $PromptGuidanceLinkLabel
         Show-SetupStatusBarAtBottom -PromptKind 'Secret'
         $textPrompt = [Spectre.Console.TextPrompt[string]]::new((Get-SetupPromptInlineText -PromptKind 'Secret'))
         $textPrompt.IsSecret = $true
@@ -1520,6 +1038,10 @@ function Select-FromMenu {
     param(
         [Parameter(Mandatory)][string]$Title,
         [Parameter(Mandatory)][string[]]$Items,
+        [Parameter()][string[]]$PromptGuidanceLines,
+        [Parameter()][string]$PromptGuidanceDocRelativePath,
+        [Parameter()][string]$PromptGuidanceRef,
+        [Parameter()][string]$PromptGuidanceLinkLabel = 'Click for docs',
         [Parameter()][switch]$PreserveExistingContent,
         [Parameter()][switch]$SkipPromptGuidance
     )
@@ -1539,7 +1061,7 @@ function Select-FromMenu {
         $canRestoreTreatControlCAsInput = $false
     }
 
-    Write-SetupPromptFrame -PromptKind 'Menu' -PromptText $Title -PreserveExistingContent:$PreserveExistingContent -SkipPromptGuidance:$SkipPromptGuidance
+    Write-SetupPromptFrame -PromptKind 'Menu' -PromptText $Title -PromptGuidanceLines $PromptGuidanceLines -PromptGuidanceDocRelativePath $PromptGuidanceDocRelativePath -PromptGuidanceRef $PromptGuidanceRef -PromptGuidanceLinkLabel $PromptGuidanceLinkLabel -PreserveExistingContent:$PreserveExistingContent -SkipPromptGuidance:$SkipPromptGuidance
 
     $effectiveItems = @($Items)
     $wizardContext = Get-SetupWizardContext
@@ -1647,11 +1169,15 @@ function Read-YesNo {
     [CmdletBinding()]
     param(
         [Parameter(Mandatory)][string]$Prompt,
+        [Parameter()][string[]]$PromptGuidanceLines,
+        [Parameter()][string]$PromptGuidanceDocRelativePath,
+        [Parameter()][string]$PromptGuidanceRef,
+        [Parameter()][string]$PromptGuidanceLinkLabel = 'Click for docs',
         [Parameter()][switch]$DefaultNo
     )
 
     Initialize-SpectreConsole
-    Write-SetupPromptFrame -PromptKind 'YesNo' -PromptText $Prompt
+    Write-SetupPromptFrame -PromptKind 'YesNo' -PromptText $Prompt -PromptGuidanceLines $PromptGuidanceLines -PromptGuidanceDocRelativePath $PromptGuidanceDocRelativePath -PromptGuidanceRef $PromptGuidanceRef -PromptGuidanceLinkLabel $PromptGuidanceLinkLabel
     Show-SetupStatusBarAtBottom -PromptKind 'YesNo'
     try {
         return [Spectre.Console.AnsiConsole]::Confirm((Get-SetupPromptInlineText -PromptKind 'YesNo'), (-not $DefaultNo))
@@ -1910,6 +1436,10 @@ function Read-TextWithDefault {
     param(
         [Parameter(Mandatory)][string]$Prompt,
         [Parameter()][string]$DefaultValue,
+        [Parameter()][string[]]$PromptGuidanceLines,
+        [Parameter()][string]$PromptGuidanceDocRelativePath,
+        [Parameter()][string]$PromptGuidanceRef,
+        [Parameter()][string]$PromptGuidanceLinkLabel = 'Click for docs',
         [Parameter()][switch]$AllowEmpty
     )
 
@@ -1917,7 +1447,7 @@ function Read-TextWithDefault {
 
     while ($true) {
         $value = $null
-        Write-SetupPromptFrame -PromptKind 'Text' -PromptText $Prompt
+        Write-SetupPromptFrame -PromptKind 'Text' -PromptText $Prompt -PromptGuidanceLines $PromptGuidanceLines -PromptGuidanceDocRelativePath $PromptGuidanceDocRelativePath -PromptGuidanceRef $PromptGuidanceRef -PromptGuidanceLinkLabel $PromptGuidanceLinkLabel
         if (-not [string]::IsNullOrWhiteSpace($DefaultValue)) {
             Show-SetupStatusBarAtBottom -PromptKind 'Text'
             try {
@@ -2052,6 +1582,67 @@ function Get-RepoChangePublishPlan {
     }
 }
 
+function Get-BranchTargetedRepoChangePublishPlan {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory)][string]$ProviderName,
+        [Parameter(Mandatory)][string]$RepositoryName,
+        [Parameter(Mandatory)][string]$TargetBranch,
+        [Parameter(Mandatory)][string]$DefaultCommitMessage,
+        [Parameter(Mandatory)][string]$DefaultPullRequestTitle,
+        [Parameter()][string]$DefaultPullRequestDescription,
+        [Parameter()][string[]]$GuidanceLines,
+        [Parameter()][string]$DocRelativePath,
+        [Parameter()][string]$Ref
+    )
+
+    $defaultGuidance = @(
+        "Choose how the generated branch-specific changes should be published for '$TargetBranch' in '$RepositoryName'.",
+        "Direct commit is fastest when you want the automation active on '$TargetBranch' immediately.",
+        "Branch + pull request is the safer option when reviews or branch protection apply before '$TargetBranch' should change."
+    )
+
+    Write-Host ""
+    Write-SetupGuidance -Lines @($defaultGuidance + @($GuidanceLines)) -DocRelativePath $DocRelativePath -Ref $Ref
+
+    $menuItems = @(
+        "Commit directly to '$TargetBranch'",
+        "Push a branch and open a pull request into '$TargetBranch'"
+    )
+
+    $selection = Select-FromMenu -Title "How should the $ProviderName changes for branch '$TargetBranch' be published?" -Items $menuItems
+    if ($null -eq $selection) {
+        throw "No repository publish option selected for branch '$TargetBranch'."
+    }
+
+    switch ($selection) {
+        0 {
+            return [pscustomobject]@{
+                Mode                   = 'Direct'
+                BranchName             = $TargetBranch
+                TargetBranch           = $TargetBranch
+                CommitMessage          = $DefaultCommitMessage
+                PullRequestTitle       = $null
+                PullRequestDescription = $null
+            }
+        }
+        1 {
+            $defaultBranchName = Get-DefaultSetupBranchName -BaseBranch $TargetBranch -Context $RepositoryName
+            $sourceBranch = Read-TextWithDefault -Prompt 'Branch to push for the pull request' -DefaultValue $defaultBranchName
+            $prTitle = Read-TextWithDefault -Prompt 'Pull request title' -DefaultValue $DefaultPullRequestTitle
+
+            return [pscustomobject]@{
+                Mode                   = 'PullRequest'
+                BranchName             = $sourceBranch
+                TargetBranch           = $TargetBranch
+                CommitMessage          = $DefaultCommitMessage
+                PullRequestTitle       = $prTitle
+                PullRequestDescription = $DefaultPullRequestDescription
+            }
+        }
+    }
+}
+
 function Get-CredentialSummaryText {
     [CmdletBinding()]
     param(
@@ -2137,7 +1728,10 @@ function Select-OrderedSolutions {
 
     while ($true) {
         Write-Section 'Configure solution order'
-        Show-SetupPromptGuidance -PromptKind 'Menu' -PromptText 'Manage solutions'
+        Write-SetupGuidance -Lines @(
+            'Use this menu to build the ordered list of unmanaged Dataverse solutions that should be kept in source control.',
+            'The order matters because setup writes it into `alm-config.psd1` and later automation uses that sequence.'
+        ) -DocRelativePath 'docs/config/alm-config.md'
 
         if ($selectedSolutions.Count -eq 0) {
             [Spectre.Console.AnsiConsole]::MarkupLine('[grey]No solutions selected yet.[/]')
@@ -2194,7 +1788,10 @@ function Select-OrderedSolutions {
 
                 $solMenu = @($available | ForEach-Object { "$($_.friendlyname) ($($_.uniquename))" })
 
-                $solIndex = Select-FromMenu -Title 'Select a solution to add' -Items $solMenu
+                $solIndex = Select-FromMenu -Title 'Select a solution to add' -Items $solMenu -PromptGuidanceLines @(
+                    'Choose the next unmanaged solution to add to the source-controlled list.',
+                    'Start with the lowest-level dependencies so the final order matches how solutions should be processed.'
+                ) -PromptGuidanceDocRelativePath 'docs/config/alm-config.md'
                 if ($null -ne $solIndex -and $solIndex -lt $available.Count) {
                     $selectedSolutions += $available[$solIndex]
                 }
@@ -2352,7 +1949,10 @@ function Select-ConfiguredDeploymentEnvironments {
         }
 
         if (-not $guidanceShown) {
-            Show-SetupPromptGuidance -PromptKind 'Menu' -PromptText $Title
+            Write-SetupGuidance -Lines @(
+                'Use this menu to add, edit, or remove the Dataverse environments that form your deployment path.',
+                'Keep the short names stable and the list in promotion order, because that order becomes the generated stage chain.'
+            )
         }
 
         Show-EnvironmentConfigurationTable -EnvironmentConfigurations $selectedEnvironments
@@ -2430,6 +2030,382 @@ function Select-ConfiguredDeploymentEnvironments {
             }
             'Done' {
                 return @($selectedEnvironments)
+            }
+        }
+    }
+}
+
+function Get-DefaultBranchEnvironmentMappingsFromStrategy {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory)][ValidateSet('Simple', 'GitflowLike')][string]$Strategy,
+        [Parameter(Mandatory)][array]$EnvironmentConfigurations,
+        [Parameter()][string]$MainBranch = 'main',
+        [Parameter()][string]$DevelopBranch = 'develop',
+        [Parameter()][string]$HotfixBranch = 'hotfix'
+    )
+
+    $items = @($EnvironmentConfigurations | Where-Object { $null -ne $_ })
+
+    if ($Strategy -eq 'Simple') {
+        return @(
+            [pscustomobject]@{
+                BranchName   = $MainBranch
+                Environments = @($items)
+            }
+        )
+    }
+
+    $prodCandidates = @($items | Where-Object {
+        $shortName = if ($_.PSObject.Properties.Name -contains 'ShortName') { [string]$_.ShortName } else { '' }
+        $friendlyName = if ($_.PSObject.Properties.Name -contains 'FriendlyName') { [string]$_.FriendlyName } else { '' }
+        ($shortName -match '(?i)^prod$|production') -or ($friendlyName -match '(?i)^prod$|production')
+    })
+
+    $prodEnvironment = $prodCandidates | Select-Object -First 1
+    $nonProd = @()
+    foreach ($environment in $items) {
+        if ($null -ne $prodEnvironment -and $environment -eq $prodEnvironment) {
+            continue
+        }
+
+        $nonProd += $environment
+    }
+
+    $mappings = @(
+        [pscustomobject]@{
+            BranchName   = $DevelopBranch
+            Environments = @($nonProd)
+        },
+        [pscustomobject]@{
+            BranchName   = $HotfixBranch
+            Environments = @()
+        },
+        [pscustomobject]@{
+            BranchName   = $MainBranch
+            Environments = @($(if ($prodEnvironment) { @($prodEnvironment) } else { @() }))
+        }
+    )
+
+    if (-not $prodEnvironment) {
+        $mappings[2].Environments = @()
+    }
+
+    return @($mappings)
+}
+
+function Test-BranchEnvironmentMappingsHaveDuplicates {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory)][array]$BranchMappings
+    )
+
+    $assignedUrls = @{}
+    foreach ($mapping in @($BranchMappings)) {
+        $branchName = [string]$mapping.BranchName
+        foreach ($environment in @($mapping.Environments)) {
+            if ($null -eq $environment) {
+                continue
+            }
+
+            $normalizedUrl = ConvertTo-NormalizedEnvironmentUrl -Url $environment.Url
+            if ([string]::IsNullOrWhiteSpace($normalizedUrl)) {
+                $normalizedUrl = [string]$environment.ShortName
+            }
+
+            if ([string]::IsNullOrWhiteSpace($normalizedUrl)) {
+                continue
+            }
+
+            if ($assignedUrls.ContainsKey($normalizedUrl) -and $assignedUrls[$normalizedUrl] -ne $branchName) {
+                return $true
+            }
+
+            $assignedUrls[$normalizedUrl] = $branchName
+        }
+    }
+
+    return $false
+}
+
+function Show-BranchEnvironmentMappingTable {
+    [CmdletBinding()]
+    param(
+        [Parameter()][array]$BranchMappings
+    )
+
+    Initialize-SpectreConsole
+
+    $items = @($BranchMappings)
+    if ($items.Count -eq 0) {
+        [Spectre.Console.AnsiConsole]::MarkupLine('[grey]No branch mappings configured yet.[/]')
+        return
+    }
+
+    $table = New-SpectreTable -Columns @('Branch', 'Environment count', 'Environments')
+    foreach ($mapping in $items) {
+        $branchName = [string]$mapping.BranchName
+        $environments = @($mapping.Environments)
+        $environmentNames = @($environments | ForEach-Object {
+            if ($null -eq $_) { return $null }
+            if ($_.PSObject.Properties.Name -contains 'ShortName' -and -not [string]::IsNullOrWhiteSpace([string]$_.ShortName)) {
+                return [string]$_.ShortName
+            }
+            return [string]$_.FriendlyName
+        } | Where-Object { -not [string]::IsNullOrWhiteSpace($_) })
+
+        Add-SpectreTableRow -Table $table -Cells @(
+            $branchName,
+            [string]$environments.Count,
+            $(if ($environmentNames.Count -gt 0) { $environmentNames -join ', ' } else { '<none>' })
+        )
+    }
+
+    [Spectre.Console.AnsiConsole]::Write($table)
+}
+
+function Select-BranchEnvironmentMappings {
+    [CmdletBinding()]
+    param(
+        [Parameter()][AllowEmptyCollection()][array]$EnvironmentConfigurations = @(),
+        [Parameter()][array]$InitialBranchMappings,
+        [Parameter()][string]$Title = 'Manage deployment branches and environment mappings',
+        [Parameter()][string[]]$GuidanceLines,
+        [Parameter()][string]$DocRelativePath,
+        [Parameter()][string]$Ref,
+        [Parameter()][switch]$BranchOnly
+    )
+
+    $allEnvironments = @($EnvironmentConfigurations | Where-Object { $null -ne $_ })
+    $branchMappings = @()
+    foreach ($mapping in @($InitialBranchMappings)) {
+        if ($null -eq $mapping -or [string]::IsNullOrWhiteSpace([string]$mapping.BranchName)) {
+            continue
+        }
+
+        $branchMappings += [pscustomobject]@{
+            BranchName   = [string]$mapping.BranchName
+            Environments = @($mapping.Environments | Where-Object { $null -ne $_ })
+        }
+    }
+
+    while ($true) {
+        Write-Section 'Configure deployment branch mappings'
+
+        if ($GuidanceLines -or $DocRelativePath) {
+            Write-SetupGuidance -Lines $GuidanceLines -DocRelativePath $DocRelativePath -Ref $Ref
+        }
+        else {
+            Write-SetupGuidance -Lines @(
+                'Use this screen to add, edit, or remove deployment branches and choose which environments each branch deploys to.',
+                'Each environment can only be assigned to one branch to keep promotion paths explicit and avoid accidental overlap.'
+            )
+        }
+
+        Show-BranchEnvironmentMappingTable -BranchMappings $branchMappings
+        [Spectre.Console.AnsiConsole]::WriteLine()
+
+        $menuItems = @('Add a branch mapping')
+        if ($branchMappings.Count -gt 0) {
+            $menuItems += 'Edit a branch mapping'
+            $menuItems += 'Remove a branch mapping'
+        }
+        $menuItems += 'Done'
+
+        $selection = Select-FromMenu -Title $Title -Items $menuItems -PreserveExistingContent -SkipPromptGuidance
+        if ($null -eq $selection) {
+            return @($branchMappings)
+        }
+
+        switch ($menuItems[$selection]) {
+            'Add a branch mapping' {
+                $defaultBranchName = if ($branchMappings.Count -eq 0) { 'main' } else { '' }
+                $branchName = Read-TextWithDefault -Prompt 'Branch name' -DefaultValue $defaultBranchName
+                $branchName = $branchName.Trim()
+                if ([string]::IsNullOrWhiteSpace($branchName)) {
+                    [Spectre.Console.AnsiConsole]::MarkupLine('[red]Branch name is required.[/]')
+                    continue
+                }
+
+                if ($branchMappings | Where-Object { $_.BranchName -ieq $branchName }) {
+                    [Spectre.Console.AnsiConsole]::MarkupLine("[red]Branch '$([string](ConvertTo-SpectreMarkupLiteral -Text $branchName))' already exists.[/]")
+                    continue
+                }
+
+                $branchMappings += [pscustomobject]@{
+                    BranchName   = $branchName
+                    Environments = @()
+                }
+            }
+            'Remove a branch mapping' {
+                $branchMenu = @($branchMappings | ForEach-Object { [string]$_.BranchName })
+                $removeIndex = Select-FromMenu -Title 'Select branch mapping to remove' -Items $branchMenu
+                if ($null -eq $removeIndex) {
+                    continue
+                }
+
+                $branchMappings = @(
+                    for ($i = 0; $i -lt $branchMappings.Count; $i++) {
+                        if ($i -ne $removeIndex) {
+                            $branchMappings[$i]
+                        }
+                    }
+                )
+            }
+            'Edit a branch mapping' {
+                $branchMenu = @($branchMappings | ForEach-Object { [string]$_.BranchName })
+                $editIndex = Select-FromMenu -Title 'Select branch mapping to edit' -Items $branchMenu
+                if ($null -eq $editIndex) {
+                    continue
+                }
+
+                $currentMapping = $branchMappings[$editIndex]
+                $mappingMenuItems = @('Rename branch')
+                if (-not $BranchOnly) {
+                    $mappingMenuItems += 'Assign environments'
+                    $mappingMenuItems += 'Clear all assigned environments'
+                }
+                $mappingMenuItems += 'Done'
+
+                while ($true) {
+                    $mappingAction = Select-FromMenu -Title "Edit branch '$($currentMapping.BranchName)'" -Items $mappingMenuItems -PreserveExistingContent
+                    if ($null -eq $mappingAction) {
+                        break
+                    }
+
+                    switch ($mappingMenuItems[$mappingAction]) {
+                        'Rename branch' {
+                            $newBranchName = Read-TextWithDefault -Prompt 'Branch name' -DefaultValue $currentMapping.BranchName
+                            $newBranchName = $newBranchName.Trim()
+                            if ([string]::IsNullOrWhiteSpace($newBranchName)) {
+                                [Spectre.Console.AnsiConsole]::MarkupLine('[red]Branch name is required.[/]')
+                                continue
+                            }
+
+                            $duplicate = $false
+                            for ($branchIndex = 0; $branchIndex -lt $branchMappings.Count; $branchIndex++) {
+                                if ($branchIndex -eq $editIndex) {
+                                    continue
+                                }
+
+                                if ($branchMappings[$branchIndex].BranchName -ieq $newBranchName) {
+                                    $duplicate = $true
+                                    break
+                                }
+                            }
+
+                            if ($duplicate) {
+                                [Spectre.Console.AnsiConsole]::MarkupLine("[red]Branch '$([string](ConvertTo-SpectreMarkupLiteral -Text $newBranchName))' already exists.[/]")
+                                continue
+                            }
+
+                            $currentMapping.BranchName = $newBranchName
+                            $branchMappings[$editIndex] = $currentMapping
+                        }
+                        'Assign environments' {
+                            $availableMap = @{}
+                            foreach ($environment in $allEnvironments) {
+                                $envUrl = ConvertTo-NormalizedEnvironmentUrl -Url $environment.Url
+                                if ([string]::IsNullOrWhiteSpace($envUrl)) {
+                                    $envUrl = [string]$environment.ShortName
+                                }
+
+                                if ([string]::IsNullOrWhiteSpace($envUrl)) {
+                                    continue
+                                }
+
+                                $availableMap[$envUrl] = [pscustomobject]@{
+                                    Environment   = $environment
+                                    AssignedTo    = $null
+                                    IsSelected    = $false
+                                }
+                            }
+
+                            foreach ($mapping in $branchMappings) {
+                                foreach ($environment in @($mapping.Environments)) {
+                                    if ($null -eq $environment) {
+                                        continue
+                                    }
+
+                                    $envUrl = ConvertTo-NormalizedEnvironmentUrl -Url $environment.Url
+                                    if ([string]::IsNullOrWhiteSpace($envUrl)) {
+                                        $envUrl = [string]$environment.ShortName
+                                    }
+
+                                    if ([string]::IsNullOrWhiteSpace($envUrl) -or -not $availableMap.ContainsKey($envUrl)) {
+                                        continue
+                                    }
+
+                                    if ($mapping.BranchName -ieq $currentMapping.BranchName) {
+                                        $availableMap[$envUrl].IsSelected = $true
+                                    }
+                                    else {
+                                        $availableMap[$envUrl].AssignedTo = [string]$mapping.BranchName
+                                    }
+                                }
+                            }
+
+                            while ($true) {
+                                $candidateItems = @()
+                                $candidateMap = @()
+                                foreach ($entry in $availableMap.GetEnumerator() | Sort-Object { $_.Value.Environment.ShortName }) {
+                                    $environment = $entry.Value.Environment
+                                    $shortName = [string]$environment.ShortName
+                                    $friendlyName = if ($environment.PSObject.Properties.Name -contains 'FriendlyName' -and -not [string]::IsNullOrWhiteSpace($environment.FriendlyName)) { [string]$environment.FriendlyName } else { $shortName }
+
+                                    if (-not [string]::IsNullOrWhiteSpace($entry.Value.AssignedTo)) {
+                                        continue
+                                    }
+
+                                    $selectedLabel = if ($entry.Value.IsSelected) { '[selected]' } else { '[not selected]' }
+                                    $candidateItems += "$shortName - $friendlyName $selectedLabel"
+                                    $candidateMap += $entry.Key
+                                }
+
+                                if ($candidateItems.Count -eq 0) {
+                                    [Spectre.Console.AnsiConsole]::MarkupLine('[yellow]No selectable environments available for this branch.[/]')
+                                    break
+                                }
+
+                                $toggleSelection = Select-FromMenu -Title "Select environments for branch '$($currentMapping.BranchName)' (toggle one at a time)" -Items @($candidateItems + @('Done')) -PromptGuidanceLines @(
+                                    'Choose which configured environments should run in this branch-specific deploy pipeline/workflow.',
+                                    'Environment assignments are exclusive across branches in this setup flow.'
+                                ) -PreserveExistingContent
+                                if ($null -eq $toggleSelection -or $toggleSelection -eq $candidateItems.Count) {
+                                    break
+                                }
+
+                                $selectedKey = $candidateMap[$toggleSelection]
+                                $availableMap[$selectedKey].IsSelected = -not $availableMap[$selectedKey].IsSelected
+                            }
+
+                            $updatedBranchEnvironments = @()
+                            foreach ($entry in $availableMap.GetEnumerator()) {
+                                if ($entry.Value.IsSelected) {
+                                    $updatedBranchEnvironments += $entry.Value.Environment
+                                }
+                            }
+
+                            $currentMapping.Environments = @($updatedBranchEnvironments | Sort-Object ShortName)
+                            $branchMappings[$editIndex] = $currentMapping
+                        }
+                        'Clear all assigned environments' {
+                            $currentMapping.Environments = @()
+                            $branchMappings[$editIndex] = $currentMapping
+                        }
+                        'Done' {
+                            break
+                        }
+                    }
+                }
+            }
+            'Done' {
+                if (Test-BranchEnvironmentMappingsHaveDuplicates -BranchMappings $branchMappings) {
+                    [Spectre.Console.AnsiConsole]::MarkupLine('[red]Each environment can only be assigned to one branch. Resolve duplicates before continuing.[/]')
+                    continue
+                }
+
+                return @($branchMappings)
             }
         }
     }
