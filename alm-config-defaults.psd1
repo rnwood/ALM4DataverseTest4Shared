@@ -5,6 +5,7 @@
 
     # Power Apps CLI version used by pipeline scripts.
     # Supports: '' (latest stable), 'prerelease', or an exact version.
+    # Note: On Windows MSI installs, use '' or an exact full-framework CLI version (for example 1.50.1).
     pacCliVersion = '2.7.4'
 
     # Timeout in seconds for each solution import operation.

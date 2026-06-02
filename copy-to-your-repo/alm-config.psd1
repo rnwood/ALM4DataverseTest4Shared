@@ -120,6 +120,7 @@
     # Power Apps CLI version used by pipeline scripts.
     # Optional override. Defaults from ALM4Dataverse are used when omitted.
     # Supports: '' (latest stable), 'prerelease', or a specific version.
+    # Note: On Windows MSI installs, use '' or an exact full-framework CLI version (for example 1.50.1).
     # pacCliVersion = '2.7.4'
 
     # Timeout in seconds for each solution import operation (default: 10800).
